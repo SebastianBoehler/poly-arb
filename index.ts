@@ -13,15 +13,14 @@
  *   MAX_INITIAL_COMBINED=1.005  Only enter if combined < this
  */
 
-import { RealTimeDataClient } from "@polymarket/real-time-data-client";
+import { ConnectionStatus, RealTimeDataClient } from "@polymarket/real-time-data-client";
 import type { MarketState } from "./types";
 import { fetchCrypto15mMarkets } from "./gamma";
 
 const baseSizeUsdc = Number(process.env.BASE_SIZE_USDC) || 5;
 const ladderStep = Number(process.env.LADDER_STEP) || 0.01;
 const sizeMultiplier = Number(process.env.SIZE_MULTIPLIER) || 1.5;
-const maxMarkets = Number(process.env.MAX_MARKETS) || 100;
-const maxInitialCombined = Number(process.env.MAX_INITIAL_COMBINED) || 1.005;
+const maxInitialCombined = Number(process.env.MAX_INITIAL_COMBINED) || 1;
 const fee = 0.02;
 
 function computeMetrics(state: MarketState) {
@@ -104,9 +103,52 @@ async function main() {
   console.log(`\nConnecting to WebSocket...\n`);
 
   const startTime = Date.now();
+  let connected = false;
+  let progressInterval: ReturnType<typeof setInterval> | undefined;
+
+  const startProgressInterval = () => {
+    if (!progressInterval) {
+      progressInterval = setInterval(() => {
+        const elapsed = (Date.now() - startTime) / 1000;
+        console.log(`\n--- ${elapsed.toFixed(0)}s elapsed ---`);
+
+        const profitable = markets.filter((m) => m.entryCount > 0 && computeMetrics(m).profitable);
+        const nearProfitable = markets.filter((m) => m.entryCount > 0 && !computeMetrics(m).profitable && computeMetrics(m).edge > -0.01);
+
+        if (profitable.length > 0) {
+          console.log(`\n✅ PROFITABLE (${profitable.length}):`);
+          for (const m of profitable) {
+            const metrics = computeMetrics(m);
+            console.log(`  ${m.slug.substring(0, 40)}: L${m.ladderLevel} avg=${metrics.combined.toFixed(4)} edge=${metrics.edgePct}%`);
+          }
+        }
+
+        if (nearProfitable.length > 0) {
+          console.log(`\n🔶 NEAR PROFITABLE (${nearProfitable.length}):`);
+          for (const m of nearProfitable) {
+            const metrics = computeMetrics(m);
+            console.log(`  ${m.slug.substring(0, 40)}: L${m.ladderLevel} avg=${metrics.combined.toFixed(4)} edge=${metrics.edgePct}%`);
+          }
+        }
+
+        const withEntries = markets.filter((m) => m.entryCount > 0).length;
+        const withUpdates = markets.filter((m) => m.priceUpdates > 0).length;
+        console.log(`\nMarkets with entries: ${withEntries}/${markets.length}, with updates: ${withUpdates}/${markets.length}`);
+      }, 60000);
+    }
+  };
+
+  const stopProgressInterval = () => {
+    if (progressInterval) {
+      clearInterval(progressInterval);
+      progressInterval = undefined;
+    }
+  };
 
   const client = new RealTimeDataClient({
+    autoReconnect: true,
     onMessage: (_client, message) => {
+      if (!connected) return;
       const { topic, type, payload } = message as { topic: string; type: string; payload: any };
 
       if (topic === "clob_market" && type === "agg_orderbook") {
@@ -143,6 +185,8 @@ async function main() {
       }
     },
     onConnect: (connectedClient: RealTimeDataClient) => {
+      connected = true;
+      startProgressInterval();
       console.log("WebSocket connected. Subscribing to clob_market streams...\n");
 
       // Single subscription for all tokens (like test-gamma.ts)
@@ -152,37 +196,20 @@ async function main() {
 
       console.log(`Subscribed to ${allTokenIds.length} token IDs\n`);
     },
+    onStatusChange: (status: ConnectionStatus) => {
+      if (status === ConnectionStatus.DISCONNECTED) {
+        connected = false;
+        stopProgressInterval();
+        console.log("WebSocket disconnected; retrying with autoReconnect...");
+      }
+      if (status === ConnectionStatus.CONNECTING) {
+        connected = false;
+        console.log("Reconnecting WebSocket...");
+      }
+    },
   });
 
   client.connect();
-
-  const progressInterval = setInterval(() => {
-    const elapsed = (Date.now() - startTime) / 1000;
-    console.log(`\n--- ${elapsed.toFixed(0)}s elapsed ---`);
-
-    const profitable = markets.filter((m) => m.entryCount > 0 && computeMetrics(m).profitable);
-    const nearProfitable = markets.filter((m) => m.entryCount > 0 && !computeMetrics(m).profitable && computeMetrics(m).edge > -0.01);
-
-    if (profitable.length > 0) {
-      console.log(`\n✅ PROFITABLE (${profitable.length}):`);
-      for (const m of profitable) {
-        const metrics = computeMetrics(m);
-        console.log(`  ${m.slug.substring(0, 40)}: L${m.ladderLevel} avg=${metrics.combined.toFixed(4)} edge=${metrics.edgePct}%`);
-      }
-    }
-
-    if (nearProfitable.length > 0) {
-      console.log(`\n🔶 NEAR PROFITABLE (${nearProfitable.length}):`);
-      for (const m of nearProfitable) {
-        const metrics = computeMetrics(m);
-        console.log(`  ${m.slug.substring(0, 40)}: L${m.ladderLevel} avg=${metrics.combined.toFixed(4)} edge=${metrics.edgePct}%`);
-      }
-    }
-
-    const withEntries = markets.filter((m) => m.entryCount > 0).length;
-    const withUpdates = markets.filter((m) => m.priceUpdates > 0).length;
-    console.log(`\nMarkets with entries: ${withEntries}/${markets.length}, with updates: ${withUpdates}/${markets.length}`);
-  }, 60000);
 
   // Run indefinitely until terminated (Ctrl+C)
   console.log("Running indefinitely. Press Ctrl+C to stop and see summary.\n");
