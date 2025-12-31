@@ -3,18 +3,24 @@
   "version": "1.0.0",
   "description": "Real-time Polymarket arbitrage ladder bot for crypto up/down 15m markets",
   "type": "module",
-  "main": "index.ts",
+  "main": "src/index.ts",
   "scripts": {
-    "start": "bun run index.ts",
-    "build": "bun build index.ts --outdir ./dist --target node",
-    "typecheck": "tsc --noEmit"
+    "start": "bun run src/index.ts",
+    "trading": "bun run src/strategies/trading.ts",
+    "stats": "bun run src/stats/stats.ts",
+    "build": "bun build src/index.ts --outdir ./dist --target node",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:watch": "bun test --watch"
   },
   "dependencies": {
     "@ethersproject/wallet": "^5.8.0",
     "@polymarket/clob-client": "^5.1.3",
-    "@polymarket/real-time-data-client": "^1.4.0"
+    "@polymarket/real-time-data-client": "^1.4.0",
+    "dotenv": "^17.2.3"
   },
   "devDependencies": {
+    "@types/bun": "latest",
     "bun-types": "latest",
     "typescript": "^5.0.0"
   },

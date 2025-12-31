@@ -10,18 +10,83 @@ This bot monitors **all active binary markets** on Polymarket (neg_risk markets 
 
 ## Strategy
 
-For binary markets on Polymarket:
+### The Core Arbitrage Opportunity
 
-- **Stream real-time prices** via WebSocket using `@polymarket/real-time-data-client`
-- **Ladder DCA**: Only enter when combined price is below threshold
-- **Exponential sizing**: Increase position size on price drops
-- **Target**: Combined avg cost < fee-adjusted payout
+In binary prediction markets, a YES token and a NO token always resolve to a combined payout of exactly **$1.00** (one of them pays $1, the other pays $0). This creates a risk-free arbitrage opportunity whenever:
+
+```
+Best Ask (YES) + Best Ask (NO) < 1.00
+```
+
+**Example:** If you can buy YES at $0.48 and NO at $0.50, you pay $0.98 total and are guaranteed to receive $1.00 when the market resolves. That's a **2% risk-free profit** (minus fees).
+
+### Why This Works
+
+1. **Guaranteed Payout**: One outcome MUST happen - either YES wins or NO wins
+2. **Fixed Return**: The winning token always pays exactly $1.00
+3. **No Directional Risk**: You don't need to predict the outcome - you profit regardless of which side wins
+
+### Two Approaches
+
+#### 1. Instant Arbitrage (Combined < 1.0)
+
+When `bestAskYes + bestAskNo < 1.0`, you can immediately fill both sides and lock in profit:
+
+```
+Buy 100 YES @ $0.48 = $48.00
+Buy 100 NO  @ $0.50 = $50.00
+Total Cost:          $98.00
+Guaranteed Payout:  $100.00
+Profit:               $2.00 (2.04% ROI)
+```
+
+This is the **ideal scenario** - pure arbitrage with no execution risk if both orders fill.
+
+#### 2. Ladder DCA Strategy (Combined ≈ 1.0)
+
+When combined prices hover around 1.0, the bot uses dollar-cost averaging:
+
+- **Initial entry** when combined < threshold (e.g., 1.005)
+- **Add to position** on price drops (ladder levels)
+- **Exponential sizing** to lower average cost faster
+- **Target**: Get average combined cost below fee-adjusted payout
 
 ### Math
 
 - **Fee-adjusted payout**: `1 - 0.02 * (1 - max_leg_price)`
 - **Edge**: `payout - combined_cost`
 - **Profitable** when edge > 0
+
+### Real-World Considerations
+
+- **Fees**: Polymarket charges ~2% on profits, reducing effective edge
+- **Execution Risk**: Both sides must fill; partial fills create directional exposure
+- **Liquidity**: Large orders may not fill at quoted prices
+- **Speed**: These opportunities are fleeting - milliseconds matter
+
+## Project Structure
+
+```
+poly-arb/
+├── src/
+│   ├── core/                    # Core business logic
+│   │   ├── types.ts             # Shared types
+│   │   └── gamma.ts             # Gamma API client (market fetching)
+│   ├── strategies/              # Trading strategies
+│   │   └── trading.ts           # Order placement logic
+│   ├── stats/                   # Statistics tracking
+│   │   ├── stats.ts             # Stats streaming
+│   │   └── utils.ts             # Stats utilities
+│   └── index.ts                 # Main entry point (ladder strategy)
+├── scripts/
+│   └── analyze_stats.py         # Python analysis script
+├── tests/                       # Bun test suite
+│   ├── core/
+│   ├── stats/
+│   └── strategies/
+├── data/                        # Output data files
+└── plots/                       # Generated plots
+```
 
 ## Requirements
 
@@ -38,11 +103,23 @@ bun install
 ## Usage
 
 ```bash
-# Run with defaults (5 min)
+# Run ladder strategy (main bot)
 bun run start
 
+# Run trading script (order placement)
+bun run trading
+
+# Run stats collection
+bun run stats
+
+# Run tests
+bun test
+
+# Type check
+bun run typecheck
+
 # Custom parameters
-DURATION_SEC=600 LADDER_STEP=0.005 SIZE_MULTIPLIER=2.0 bun run start
+LADDER_STEP=0.005 SIZE_MULTIPLIER=2.0 bun run start
 ```
 
 ## Configuration
@@ -82,6 +159,32 @@ Duration: 300s (~5.0 min)
 ✅ PROFITABLE (1):
   btc-updown-15m-1767139200: L1 avg=0.9900 edge=0.20%
 ```
+
+## Analysis & Insights
+
+The bot tracks market inefficiencies across crypto 15-minute prediction markets. Run the analysis script to generate visualizations:
+
+```bash
+python scripts/analyze_stats.py --csv output.csv --out-dir plots
+```
+
+### Market Inefficiency
+
+Shows the percentage of price updates where combined YES+NO ask prices fall below various thresholds. Combined < 1.0 represents an arbitrage opportunity (before fees).
+
+![Market Inefficiency](plots/market_inefficiency.png)
+
+### Inefficiency by Symbol
+
+Compares arbitrage opportunity frequency across different crypto assets.
+
+![Inefficiency by Symbol](plots/inefficiency_by_symbol.png)
+
+### Hit Rates by Threshold
+
+Detailed breakdown of hit rates per symbol across all tracked thresholds.
+
+![Hit Rates](plots/hit_rates_per_symbol.png)
 
 ## Disclaimer
 
