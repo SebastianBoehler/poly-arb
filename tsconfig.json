@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "types": ["bun-types", "node"]
+    "types": ["bun-types"]
   },
-  "include": ["src/**/*"]
+  "include": ["*.ts"]
 }
