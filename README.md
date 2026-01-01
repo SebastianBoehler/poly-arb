@@ -122,6 +122,8 @@ bun run typecheck
 LADDER_STEP=0.005 SIZE_MULTIPLIER=2.0 bun run start
 ```
 
+Real-time streaming reference: [docs/realtime-guide.md](docs/realtime-guide.md)
+
 ## Configuration
 
 | Variable               | Default | Description                               |
