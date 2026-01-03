@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <regex>
 #include <cstdlib>
+#include <cmath>
 
 using namespace polymarket;
 
