@@ -195,6 +195,13 @@ export class RedemptionService {
       let tx: ethers.providers.TransactionResponse;
       console.log(`[RedemptionService] Sending transaction...`);
 
+      // Get gas price with 100% boost for faster confirmation (Polygon can be congested)
+      const gasPrice = await this.provider.getGasPrice();
+      const boostedGasPrice = gasPrice.mul(200).div(100);
+      // Get pending nonce to handle stuck transactions
+      const nonce = await this.provider.getTransactionCount(this.wallet.address, "pending");
+      const overrides: ethers.Overrides = { gasPrice: boostedGasPrice, nonce };
+
       if (this.isSafeWallet) {
         const safe = new ethers.Contract(this.userAddress, SAFE_ABI, this.wallet);
         const txn: SafeTransaction = {
@@ -203,10 +210,10 @@ export class RedemptionService {
           data: calldata,
           operation: OperationType.Call,
         };
-        tx = await signAndExecuteSafeTransaction(this.wallet, safe, txn);
+        tx = await signAndExecuteSafeTransaction(this.wallet, safe, txn, overrides);
       } else {
         const contract = new ethers.Contract(targetContract, CTF_ABI, this.wallet);
-        tx = await contract.redeemPositions(USDC_ADDRESS, ethers.constants.HashZero, conditionId, [1, 2]);
+        tx = await contract.redeemPositions(USDC_ADDRESS, ethers.constants.HashZero, conditionId, [1, 2], overrides);
       }
 
       console.log(`[RedemptionService] TX sent: ${tx.hash}, waiting for confirmation...`);
@@ -332,6 +339,7 @@ export class RedemptionService {
 async function main() {
   const privateKey = process.env.PRIVATE_KEY;
   const funderAddress = process.env.FUNDER_ADDRESS;
+  const daemon = process.env.DAEMON === "true";
   const pollInterval = parseInt(process.env.POLL_INTERVAL_MS || "30000", 10);
 
   if (!privateKey) {
@@ -345,18 +353,42 @@ async function main() {
     pollIntervalMs: pollInterval,
   });
 
-  // Handle graceful shutdown
-  process.on("SIGINT", () => {
-    service.stop();
-    process.exit(0);
-  });
+  if (daemon) {
+    // Handle graceful shutdown
+    process.on("SIGINT", () => {
+      service.stop();
+      process.exit(0);
+    });
 
-  process.on("SIGTERM", () => {
-    service.stop();
-    process.exit(0);
-  });
+    process.on("SIGTERM", () => {
+      service.stop();
+      process.exit(0);
+    });
 
-  await service.start();
+    await service.start();
+  } else {
+    // One-shot mode: check and redeem once, then exit
+    console.log("[RedemptionService] Running one-shot redemption check...");
+    console.log(`[RedemptionService] Wallet: ${service["wallet"].address}`);
+    console.log(`[RedemptionService] User: ${service["userAddress"]}`);
+    console.log(`[RedemptionService] Mode: ${service["isSafeWallet"] ? "Safe Wallet" : "EOA"}`);
+
+    const results = await service.checkAndRedeem();
+
+    if (results.length === 0) {
+      console.log("[RedemptionService] No positions redeemed.");
+    } else {
+      for (const r of results) {
+        if (r.success) {
+          console.log(`[RedemptionService] ✓ Redeemed ${r.conditionId.slice(0, 10)}... TX: ${r.txHash}`);
+        } else {
+          console.log(`[RedemptionService] ✗ Failed ${r.conditionId.slice(0, 10)}...: ${r.error}`);
+        }
+      }
+    }
+
+    console.log("[RedemptionService] Done.");
+  }
 }
 
 // Run if called directly
