@@ -187,5 +187,22 @@ target_link_libraries(position_smoke
     keccak
 )
 
+# Order placement benchmark executable
+add_executable(order_benchmark 
+    src/order_benchmark.cpp 
+    src/order_signer.cpp 
+    src/http_client.cpp
+)
+target_link_libraries(order_benchmark
+    PRIVATE
+    ${CURL_LIBRARIES}
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+    nlohmann_json::nlohmann_json
+    secp256k1
+    keccak
+)
+
 # Install
 install(TARGETS polymarket_arb DESTINATION bin)

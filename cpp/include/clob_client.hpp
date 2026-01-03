@@ -121,6 +121,7 @@ namespace polymarket
         std::string fee_rate_bps = "0";
         std::string expiration = "0";
         std::string nonce = "0";
+        std::optional<bool> neg_risk; // If set, skips API call to fetch neg_risk
     };
 
     // Create market order parameters
@@ -227,8 +228,12 @@ namespace polymarket
         // ============================================================
 
         // Order creation (creates signed order, does not post)
+        // If params.neg_risk is set, uses that value instead of fetching from API
         SignedOrder create_order(const CreateOrderParams &params);
         SignedOrder create_market_order(const CreateMarketOrderParams &params);
+
+        // Create order with explicit neg_risk (skips API call - faster)
+        SignedOrder create_order_fast(const CreateOrderParams &params, bool neg_risk);
 
         // Order posting
         OrderResponse post_order(const SignedOrder &order, OrderType order_type = OrderType::GTC);

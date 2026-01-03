@@ -649,11 +649,19 @@ namespace polymarket
             throw std::runtime_error("Client not authenticated");
         }
 
-        // Determine exchange address based on neg_risk
-        auto neg_risk_info = get_neg_risk(params.token_id);
-        std::string exchange_addr = (neg_risk_info && neg_risk_info->neg_risk)
-                                        ? NEG_RISK_EXCHANGE_ADDRESS
-                                        : EXCHANGE_ADDRESS;
+        // Use cached neg_risk if provided, otherwise fetch from API
+        bool is_neg_risk = false;
+        if (params.neg_risk.has_value())
+        {
+            is_neg_risk = params.neg_risk.value();
+        }
+        else
+        {
+            auto neg_risk_info = get_neg_risk(params.token_id);
+            is_neg_risk = neg_risk_info && neg_risk_info->neg_risk;
+        }
+
+        std::string exchange_addr = is_neg_risk ? NEG_RISK_EXCHANGE_ADDRESS : EXCHANGE_ADDRESS;
 
         // Calculate amounts
         double maker_amount, taker_amount;
@@ -666,6 +674,44 @@ namespace polymarket
         else
         {
             // SELL: maker pays shares, receives USDC
+            maker_amount = params.size;
+            taker_amount = params.size * params.price;
+        }
+
+        OrderData order_data;
+        order_data.maker = funder_address_.empty() ? order_signer_->address() : funder_address_;
+        order_data.taker = "0x0000000000000000000000000000000000000000";
+        order_data.token_id = params.token_id;
+        order_data.maker_amount = to_wei(maker_amount, 6);
+        order_data.taker_amount = to_wei(taker_amount, 6);
+        order_data.side = params.side;
+        order_data.fee_rate_bps = params.fee_rate_bps;
+        order_data.nonce = params.nonce;
+        order_data.signer = order_signer_->address();
+        order_data.expiration = params.expiration;
+        order_data.signature_type = sig_type_;
+
+        return order_signer_->sign_order(order_data, exchange_addr);
+    }
+
+    SignedOrder ClobClient::create_order_fast(const CreateOrderParams &params, bool neg_risk)
+    {
+        if (!order_signer_)
+        {
+            throw std::runtime_error("Client not authenticated");
+        }
+
+        std::string exchange_addr = neg_risk ? NEG_RISK_EXCHANGE_ADDRESS : EXCHANGE_ADDRESS;
+
+        // Calculate amounts
+        double maker_amount, taker_amount;
+        if (params.side == OrderSide::BUY)
+        {
+            maker_amount = params.size * params.price;
+            taker_amount = params.size;
+        }
+        else
+        {
             maker_amount = params.size;
             taker_amount = params.size * params.price;
         }

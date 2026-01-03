@@ -64,6 +64,19 @@ When combined prices hover around 1.0, the bot uses dollar-cost averaging:
 - **Liquidity**: Large orders may not fill at quoted prices
 - **Speed**: These opportunities are fleeting - milliseconds matter
 
+## Performance: C++ vs TypeScript
+
+For latency-critical arbitrage, we implemented a native C++ client alongside the TypeScript version. The C++ implementation is **1613x faster** at order signing due to native secp256k1 cryptography.
+
+![Order Benchmark](plots/order_benchmark_comparison.png)
+
+| Metric         | C++     | TypeScript | Speedup   |
+| -------------- | ------- | ---------- | --------- |
+| **Sign time**  | 0.06 ms | 96.8 ms    | **1613x** |
+| **Total time** | 50.7 ms | 147.2 ms   | **2.9x**  |
+
+The C++ client also caches `neg_risk` per market to avoid API calls during order creation.
+
 ## Project Structure
 
 ```
