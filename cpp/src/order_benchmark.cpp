@@ -13,8 +13,8 @@
  *   NUM_ORDERS       - Number of orders to benchmark (default: 5)
  */
 
-#include "order_signer.hpp"
-#include "http_client.hpp"
+#include <order_signer.hpp>
+#include <http_client.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <cstdlib>
@@ -142,7 +142,14 @@ int main(int argc, char *argv[])
             if (!book_json.contains("asks") || book_json["asks"].empty())
                 continue;
 
-            best_ask = std::stod(book_json["asks"][0]["price"].get<std::string>());
+            // Find best (lowest) ask - orderbook is NOT sorted
+            best_ask = 1.0;
+            for (const auto &ask : book_json["asks"])
+            {
+                double price = std::stod(ask["price"].get<std::string>());
+                if (price < best_ask)
+                    best_ask = price;
+            }
 
             // Get neg_risk (cache it once)
             auto neg_risk_response = http.get("/neg-risk?token_id=" + token_id);

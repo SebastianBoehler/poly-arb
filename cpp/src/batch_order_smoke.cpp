@@ -8,8 +8,8 @@
  * Run: PRIVATE_KEY=0x... FUNDER_ADDRESS=0x... ./build/batch_order_smoke
  */
 
-#include "order_signer.hpp"
-#include "http_client.hpp"
+#include <order_signer.hpp>
+#include <http_client.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <cstdlib>
@@ -159,10 +159,29 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        best_ask_yes = std::stod(yes_json["asks"][0]["price"].get<std::string>());
-        best_ask_no = std::stod(no_json["asks"][0]["price"].get<std::string>());
-        best_ask_size_yes = std::stod(yes_json["asks"][0]["size"].get<std::string>());
-        best_ask_size_no = std::stod(no_json["asks"][0]["size"].get<std::string>());
+        // Find best (lowest) ask - orderbook is NOT sorted
+        best_ask_yes = 1.0;
+        best_ask_size_yes = 0.0;
+        for (const auto &ask : yes_json["asks"])
+        {
+            double price = std::stod(ask["price"].get<std::string>());
+            if (price < best_ask_yes)
+            {
+                best_ask_yes = price;
+                best_ask_size_yes = std::stod(ask["size"].get<std::string>());
+            }
+        }
+        best_ask_no = 1.0;
+        best_ask_size_no = 0.0;
+        for (const auto &ask : no_json["asks"])
+        {
+            double price = std::stod(ask["price"].get<std::string>());
+            if (price < best_ask_no)
+            {
+                best_ask_no = price;
+                best_ask_size_no = std::stod(ask["size"].get<std::string>());
+            }
+        }
 
         auto neg_risk_response = http.get("/neg-risk?token_id=" + yes_token);
         if (neg_risk_response.ok())

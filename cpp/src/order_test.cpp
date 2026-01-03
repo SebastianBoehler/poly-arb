@@ -11,8 +11,8 @@
  *   PRIVATE_KEY=0x... FUNDER_ADDRESS=0x... ./order_test [--live]
  */
 
-#include "order_signer.hpp"
-#include "http_client.hpp"
+#include <order_signer.hpp>
+#include <http_client.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <cstdlib>
@@ -318,7 +318,14 @@ int main(int argc, char *argv[])
                                 auto book_json = json::parse(book_response.body);
                                 if (book_json.contains("asks") && !book_json["asks"].empty())
                                 {
-                                    best_ask = std::stod(book_json["asks"][0]["price"].get<std::string>());
+                                    // Find best (lowest) ask - orderbook is NOT sorted
+                                    best_ask = 1.0;
+                                    for (const auto &ask : book_json["asks"])
+                                    {
+                                        double price = std::stod(ask["price"].get<std::string>());
+                                        if (price < best_ask)
+                                            best_ask = price;
+                                    }
                                     if (best_ask > 0.0 && best_ask < 1.0)
                                     {
                                         yes_token = candidate_token;

@@ -1,12 +1,18 @@
 # poly-arb
 
 [![Build](https://github.com/SebastianBoehler/poly-arb/actions/workflows/build.yml/badge.svg)](https://github.com/SebastianBoehler/poly-arb/actions/workflows/build.yml)
+[![C++ Build](https://github.com/SebastianBoehler/polymarket-cpp-client/actions/workflows/build.yml/badge.svg)](https://github.com/SebastianBoehler/polymarket-cpp-client/actions/workflows/build.yml)
 
-Real-time Polymarket arbitrage ladder bot for all binary (neg_risk) markets.
+High-performance Polymarket arbitrage bot written in **C++** for low-latency trading.
 
 ## Overview
 
-This bot monitors **all active binary markets** on Polymarket (neg_risk markets with Yes/No outcomes) and uses a ladder DCA strategy to find arbitrage opportunities by buying both outcomes when the combined price is favorable.
+This bot monitors binary markets on Polymarket and executes arbitrage opportunities when the combined YES+NO ask price falls below $1.00. The core trading logic is implemented in **C++** for maximum performance, using the [polymarket-cpp-client](https://github.com/SebastianBoehler/polymarket-cpp-client) library for API interactions.
+
+### Architecture
+
+- **C++ (core)**: Order signing, WebSocket streaming, batch order placement, arbitrage detection
+- **TypeScript (auxiliary)**: Position redemption/merging, stats collection, market analysis
 
 ## Strategy
 
@@ -64,44 +70,51 @@ When combined prices hover around 1.0, the bot uses dollar-cost averaging:
 - **Liquidity**: Large orders may not fill at quoted prices
 - **Speed**: These opportunities are fleeting - milliseconds matter
 
-## Performance: C++ vs TypeScript
+## Performance
 
-For latency-critical arbitrage, we implemented a native C++ client alongside the TypeScript version. The C++ implementation is **1613x faster** at order signing due to native secp256k1 cryptography.
-
-![Order Benchmark](plots/order_benchmark_comparison.png)
+The C++ implementation provides significant performance advantages for latency-critical arbitrage:
 
 | Metric         | C++     | TypeScript | Speedup   |
 | -------------- | ------- | ---------- | --------- |
 | **Sign time**  | 0.06 ms | 96.8 ms    | **1613x** |
 | **Total time** | 50.7 ms | 147.2 ms   | **2.9x**  |
 
-The C++ client also caches `neg_risk` per market to avoid API calls during order creation.
+The C++ client uses native secp256k1 cryptography and caches `neg_risk` per market to minimize API calls.
 
 ## Project Structure
 
 ```
 poly-arb/
-├── src/
-│   ├── core/                    # Core business logic
-│   │   ├── types.ts             # Shared types
-│   │   └── gamma.ts             # Gamma API client (market fetching)
-│   ├── strategies/              # Trading strategies
-│   │   └── trading.ts           # Order placement logic
-│   ├── stats/                   # Statistics tracking
-│   │   ├── stats.ts             # Stats streaming
-│   │   └── utils.ts             # Stats utilities
-│   └── index.ts                 # Main entry point (ladder strategy)
+├── cpp/                         # C++ trading core (main)
+│   ├── src/
+│   │   ├── arb_test.cpp         # Arbitrage detector with WebSocket
+│   │   ├── batch_order_smoke.cpp # Batch order placement test
+│   │   ├── ladder_accumulation.cpp # Ladder DCA strategy
+│   │   ├── order_benchmark.cpp  # Order latency benchmarking
+│   │   └── main.cpp             # Main arbitrage bot
+│   └── CMakeLists.txt           # Uses polymarket-cpp-client via FetchContent
+├── src/                         # TypeScript auxiliary tools
+│   ├── core/                    # Shared types and utilities
+│   ├── services/
+│   │   └── redemption-service.ts # Position redemption/merging
+│   ├── stats/
+│   │   └── stats.ts             # Market stats collection
+│   └── scripts/                 # Various smoke tests
 ├── scripts/
 │   └── analyze_stats.py         # Python analysis script
 ├── tests/                       # Bun test suite
-│   ├── core/
-│   ├── stats/
-│   └── strategies/
-├── data/                        # Output data files
-└── plots/                       # Generated plots
+└── plots/                       # Generated analysis plots
 ```
 
 ## Requirements
+
+### C++ (trading core)
+
+- CMake 3.16+
+- C++20 compiler (clang/gcc)
+- OpenSSL, curl
+
+### TypeScript (auxiliary tools)
 
 - [Bun](https://bun.sh/) runtime
 
@@ -110,67 +123,103 @@ poly-arb/
 ```bash
 git clone https://github.com/SebastianBoehler/poly-arb.git
 cd poly-arb
+
+# Build C++ executables
+cd cpp
+mkdir build && cd build
+cmake ..
+make -j8
+
+# Install TypeScript dependencies
+cd ../..
 bun install
 ```
 
 ## Usage
 
+### C++ Arbitrage Bot (recommended)
+
 ```bash
-# Run ladder strategy (main bot)
-bun run start
+# Set environment variables
+export PRIVATE_KEY=0x...
+export FUNDER_ADDRESS=0x...
 
-# Run trading script (order placement)
-bun run trading
+# Run arbitrage detector (monitors and places batch orders)
+./cpp/build/arb_test
 
-# Run stats collection
-bun run stats
+# Run with custom parameters
+TRIGGER_COMBINED=0.995 SIZE_USDC=5 DRY_RUN=true ./cpp/build/arb_test
+
+# Run batch order smoke test
+./cpp/build/batch_order_smoke
+
+# Run order benchmark
+./cpp/build/order_benchmark
+```
+
+### TypeScript Tools
+
+```bash
+# Run stats collection (market analysis)
+bun run src/stats/stats.ts
+
+# Run position redemption service
+bun run src/services/redemption-service.ts
 
 # Run tests
 bun test
-
-# Type check
-bun run typecheck
-
-# Custom parameters
-LADDER_STEP=0.005 SIZE_MULTIPLIER=2.0 bun run start
 ```
 
 ## Configuration
 
-| Variable               | Default | Description                               |
-| ---------------------- | ------- | ----------------------------------------- |
-| `DURATION_SEC`         | 300     | How long to run (seconds)                 |
-| `BASE_SIZE_USDC`       | 5       | Base USD per ladder level                 |
-| `LADDER_STEP`          | 0.01    | Combined price drop to trigger next level |
-| `SIZE_MULTIPLIER`      | 1.5     | Multiply size at each ladder level        |
-| `MAX_INITIAL_COMBINED` | 1.005   | Only enter if combined < this             |
-| `MAX_MARKETS`          | 100     | Maximum number of markets to track        |
+### C++ Environment Variables
+
+| Variable           | Default | Description                             |
+| ------------------ | ------- | --------------------------------------- |
+| `PRIVATE_KEY`      | -       | Wallet private key (required)           |
+| `FUNDER_ADDRESS`   | -       | Gnosis Safe address holding funds       |
+| `TRIGGER_COMBINED` | 0.98    | Place orders when combined < this       |
+| `MAX_COMBINED`     | 0.99    | Max combined price with slippage buffer |
+| `SIZE_USDC`        | 1       | USD amount per leg                      |
+| `DRY_RUN`          | true    | Set to "false" for live trading         |
 
 ## How It Works
 
-1. Fetches all active `neg_risk` binary markets from Polymarket CLOB API
-2. Subscribes to real-time price updates via WebSocket (`clob_market` topic)
-3. Waits for favorable combined price (< `MAX_INITIAL_COMBINED`)
-4. Enters position and applies ladder DCA on price drops
-5. Reports edge and profitability in real-time
+1. **Market Discovery**: Fetches active crypto 15m markets from Gamma API
+2. **WebSocket Streaming**: Subscribes to `agg_orderbook` for real-time depth
+3. **Opportunity Detection**: Monitors for `bestAskYes + bestAskNo < trigger`
+4. **Batch Execution**: Places YES and NO orders simultaneously via batch API
+5. **FOK Orders**: Uses Fill-Or-Kill to ensure complete fills or cancellation
 
 ## Example Output
 
 ```
-Fetching ALL active neg_risk (binary) markets from CLOB API...
-Found 100 active neg_risk (binary) markets
+=== C++ Arbitrage Test ===
+Size per leg: $1
+Trigger combined: 0.98
 
-=== REAL-TIME LADDER ACCUMULATION ===
-Markets: 100, Token IDs: 200
-Duration: 300s (~5.0 min)
+[2] Finding BTC 15m market with liquidity...
+    Found: btc-updown-15m-1767472200 (expires in 15min)
+    Best ask YES: 0.51
+    Best ask NO:  0.50
+    Combined:     1.01
 
-📈 russia-x-ukraine-ceasefire-in-  L1: comb=1.0010 avg=1.0010 edge=-0.10% ❌
-📈 dogecoin-all-time-high-before-  L1: comb=1.0020 avg=1.0020 edge=-0.20% ❌
-📈 btc-updown-15m-1767139200       L1: comb=0.9900 avg=0.9900 edge=0.20% ✅
+[3] Connecting to WebSocket for real-time orderbook...
+    WebSocket connected!
+    Subscribed to agg_orderbook
 
---- 60s elapsed ---
-✅ PROFITABLE (1):
-  btc-updown-15m-1767139200: L1 avg=0.9900 edge=0.20%
+[4] Monitoring for arbitrage opportunity (combined < 0.98)...
+    [15:46] UP: 0.51 + DOWN: 0.50 = 1.0100 (trigger: 0.9800)
+    [15:41] UP: 0.48 + DOWN: 0.49 = 0.9700 (trigger: 0.9800)
+
+    ✅ OPPORTUNITY FOUND!
+    Combined: 0.97 < 0.98
+    Potential profit: 3.00%
+
+[5] Posting batch order (FOK)...
+    YES order: ✓ matched (100 shares @ $0.48)
+    NO order:  ✓ matched (100 shares @ $0.49)
+    BOTH ORDERS FILLED!
 ```
 
 ## Analysis & Insights

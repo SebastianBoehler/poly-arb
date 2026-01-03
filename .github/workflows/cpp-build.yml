@@ -1,0 +1,34 @@
+name: C++ Build
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "cpp/**"
+      - ".github/workflows/cpp-build.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "cpp/**"
+      - ".github/workflows/cpp-build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev libcurl4-openssl-dev
+
+      - name: Configure CMake
+        working-directory: cpp
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        working-directory: cpp
+        run: cmake --build build --parallel $(nproc)

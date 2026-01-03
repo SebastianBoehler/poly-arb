@@ -11,9 +11,9 @@
  * Run: PRIVATE_KEY=0x... FUNDER_ADDRESS=0x... ./build/position_smoke
  */
 
-#include "clob_client.hpp"
-#include "order_signer.hpp"
-#include "http_client.hpp"
+#include <clob_client.hpp>
+#include <order_signer.hpp>
+#include <http_client.hpp>
 #include <iostream>
 #include <cstdlib>
 #include <iomanip>
@@ -31,15 +31,11 @@ void print_usage()
               << "  FUNDER_ADDRESS   - Address holding funds (for proxy wallets)\n\n"
               << "Options:\n"
               << "  --help           - Show this help\n"
-              << "  --dry-run        - Don't actually redeem/merge (default)\n"
-              << "  --live           - Actually execute redeem/merge operations\n"
               << std::endl;
 }
 
 int main(int argc, char *argv[])
 {
-    bool dry_run = true;
-
     for (int i = 1; i < argc; i++)
     {
         std::string arg = argv[i];
@@ -48,10 +44,6 @@ int main(int argc, char *argv[])
             print_usage();
             return 0;
         }
-        if (arg == "--live")
-            dry_run = false;
-        if (arg == "--dry-run")
-            dry_run = true;
     }
 
     const char *private_key_env = std::getenv("PRIVATE_KEY");
@@ -69,7 +61,6 @@ int main(int argc, char *argv[])
 
     std::cout << "Position Management Smoke Test\n"
               << "===============================\n\n";
-    std::cout << "Mode: " << (dry_run ? "DRY-RUN" : "LIVE") << "\n\n";
 
     http_global_init();
 
@@ -168,53 +159,17 @@ int main(int argc, char *argv[])
     std::cout << "        Redeemable:      " << redeemable_count << "\n";
     std::cout << "        Mergeable:       " << mergeable_count << "\n\n";
 
-    // Process redeemable positions
+    // Display redeemable positions (redemption handled via TypeScript service)
     if (redeemable_count > 0)
     {
         std::cout << "[5] Redeemable Positions (resolved markets with winning shares):\n";
-
-        auto redeemable = client.get_redeemable_positions();
-        for (const auto &pos : redeemable)
+        for (const auto &pos : positions)
         {
-            std::cout << "    - " << pos.title << " (" << pos.outcome << "): "
-                      << pos.size << " shares\n";
-
-            if (!dry_run)
+            if (pos.redeemable && pos.size > 0)
             {
-                std::cout << "      Attempting to redeem...\n";
-
-                // Note: Safe wallet redemption should be done via TypeScript service
-                if (funder_address != signer.address())
-                {
-                    std::cout << "      SKIPPED: Safe wallet redemption not supported in C++.\n";
-                    std::cout << "      Use TypeScript redemption service instead.\n";
-                    continue;
-                }
-
-                auto result = client.redeem_positions(pos.condition_id);
-
-                if (result.success)
-                {
-                    std::cout << "      SUCCESS! TX: " << result.tx_hash << "\n";
-                    std::cout << "      Redeemed: $" << result.amount_redeemed << "\n";
-                }
-                else
-                {
-                    std::cout << "      FAILED: " << result.error_msg << "\n";
-                    if (!result.tx_hash.empty())
-                    {
-                        std::cout << "      TX Hash (for debugging): " << result.tx_hash << "\n";
-                    }
-                }
-            }
-            else
-            {
-                std::cout << "      [DRY RUN] Would redeem " << pos.size << " shares";
-                if (funder_address != signer.address())
-                {
-                    std::cout << " (requires TypeScript service for Safe wallet)";
-                }
-                std::cout << "\n";
+                std::cout << "    - " << pos.title << " (" << pos.outcome << "): "
+                          << pos.size << " shares\n";
+                std::cout << "      [INFO] Use TypeScript redemption service to redeem.\n";
             }
         }
         std::cout << "\n";
@@ -224,18 +179,19 @@ int main(int argc, char *argv[])
         std::cout << "[5] No redeemable positions found.\n\n";
     }
 
-    // Process mergeable positions
+    // Display mergeable positions (merging handled via TypeScript service)
     if (mergeable_count > 0)
     {
         std::cout << "[6] Mergeable Positions (can merge Yes+No back to USDC):\n";
 
-        auto mergeable = client.get_mergeable_positions();
-
         // Group by condition_id to find matching Yes/No pairs
         std::map<std::string, std::vector<ClobClient::Position>> by_condition;
-        for (const auto &pos : mergeable)
+        for (const auto &pos : positions)
         {
-            by_condition[pos.condition_id].push_back(pos);
+            if (pos.mergeable && pos.size > 0)
+            {
+                by_condition[pos.condition_id].push_back(pos);
+            }
         }
 
         for (const auto &[condition_id, cond_positions] : by_condition)
@@ -248,7 +204,6 @@ int main(int argc, char *argv[])
             double yes_size = 0, no_size = 0;
             for (const auto &pos : cond_positions)
             {
-                // Check for various outcome naming conventions
                 std::string outcome_lower = pos.outcome;
                 std::transform(outcome_lower.begin(), outcome_lower.end(), outcome_lower.begin(), ::tolower);
 
@@ -261,26 +216,7 @@ int main(int argc, char *argv[])
             double merge_amount = std::min(yes_size, no_size);
             std::cout << "      Yes: " << yes_size << ", No: " << no_size << "\n";
             std::cout << "      Can merge: " << merge_amount << " shares -> $" << merge_amount << " USDC\n";
-
-            if (!dry_run && merge_amount > 0)
-            {
-                std::cout << "      Attempting to merge...\n";
-                auto result = client.merge_positions(condition_id, merge_amount);
-
-                if (result.success)
-                {
-                    std::cout << "      SUCCESS! TX: " << result.tx_hash << "\n";
-                    std::cout << "      Merged: $" << result.amount_merged << " USDC\n";
-                }
-                else
-                {
-                    std::cout << "      FAILED: " << result.error_msg << "\n";
-                }
-            }
-            else if (merge_amount > 0)
-            {
-                std::cout << "      [DRY RUN] Would merge " << merge_amount << " shares\n";
-            }
+            std::cout << "      [INFO] Use TypeScript service to merge.\n";
         }
         std::cout << "\n";
     }
@@ -289,9 +225,9 @@ int main(int argc, char *argv[])
         std::cout << "[6] No mergeable positions found.\n\n";
     }
 
-    if (dry_run && (redeemable_count > 0 || mergeable_count > 0))
+    if (redeemable_count > 0 || mergeable_count > 0)
     {
-        std::cout << "[NOTE] Use --live flag to actually execute redeem/merge operations.\n\n";
+        std::cout << "[NOTE] Redeem/merge operations are handled via TypeScript service.\n\n";
     }
 
     std::cout << "[DONE] Position management smoke test complete.\n";

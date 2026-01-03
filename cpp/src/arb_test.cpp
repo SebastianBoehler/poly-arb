@@ -8,9 +8,9 @@
  * Run: PRIVATE_KEY=0x... FUNDER_ADDRESS=0x... ./build/arb_test
  */
 
-#include "order_signer.hpp"
-#include "http_client.hpp"
-#include "websocket_client.hpp"
+#include <order_signer.hpp>
+#include <http_client.hpp>
+#include <websocket_client.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <cstdlib>
@@ -256,8 +256,21 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        double best_ask_yes = std::stod(yes_json["asks"][0]["price"].get<std::string>());
-        double best_ask_no = std::stod(no_json["asks"][0]["price"].get<std::string>());
+        // Find best (lowest) ask - orderbook may not be sorted
+        double best_ask_yes = 1.0;
+        for (const auto &ask : yes_json["asks"])
+        {
+            double price = std::stod(ask["price"].get<std::string>());
+            if (price < best_ask_yes)
+                best_ask_yes = price;
+        }
+        double best_ask_no = 1.0;
+        for (const auto &ask : no_json["asks"])
+        {
+            double price = std::stod(ask["price"].get<std::string>());
+            if (price < best_ask_no)
+                best_ask_no = price;
+        }
 
         if (best_ask_yes <= 0.0 || best_ask_yes >= 1.0 ||
             best_ask_no <= 0.0 || best_ask_no >= 1.0)
@@ -317,58 +330,51 @@ int main(int argc, char *argv[])
         std::cout << "    WebSocket connected!\n";
         ws_connected.store(true);
 
-        // Subscribe to orderbook updates for both tokens
+        // Subscribe to orderbook updates for both tokens (Polymarket format)
+        json token_array = json::array({market.token_yes, market.token_no});
+        
+        // Subscribe to agg_orderbook - gives full orderbook depth for size calculation
         json subscribe_msg;
         subscribe_msg["type"] = "subscribe";
-        subscribe_msg["channel"] = "market";
-        subscribe_msg["assets_ids"] = json::array({market.token_yes, market.token_no});
+        subscribe_msg["subscriptions"] = json::array({
+            {{"topic", "clob_market"}, {"type", "agg_orderbook"}, {"filters", token_array.dump()}}
+        });
         ws.send(subscribe_msg.dump());
-        std::cout << "    Subscribed to orderbook updates\n"; });
+        
+        std::cout << "    Subscribed to agg_orderbook\n"; });
 
     ws.on_message([&](const std::string &msg)
                   {
         try {
             auto j = json::parse(msg);
             
-            // Handle orderbook updates
-            if (j.contains("event_type") && j["event_type"] == "book") {
-                std::string asset_id = j.value("asset_id", "");
+            // Polymarket WebSocket format: { topic, type, payload }
+            std::string topic = j.value("topic", "");
+            std::string type = j.value("type", "");
+            
+            // Handle agg_orderbook updates (full orderbook with asks/bids)
+            if (topic == "clob_market" && type == "agg_orderbook") {
+                if (!j.contains("payload")) return;
+                auto payload = j["payload"];
+                std::string asset_id = payload.value("asset_id", "");
                 
-                if (j.contains("bids") || j.contains("asks")) {
-                    std::lock_guard<std::mutex> lock(price_mutex);
+                if (payload.contains("asks") && !payload["asks"].empty()) {
+                    // Find best (lowest) ask
+                    double best = 1.0;
+                    for (const auto& ask : payload["asks"]) {
+                        double price = std::stod(ask["price"].get<std::string>());
+                        if (price < best) best = price;
+                    }
                     
-                    if (asset_id == market.token_yes && j.contains("asks") && !j["asks"].empty()) {
-                        // Find best (lowest) ask
-                        double best = 1.0;
-                        for (const auto& ask : j["asks"]) {
-                            double price = std::stod(ask["price"].get<std::string>());
-                            if (price < best) best = price;
-                        }
+                    std::lock_guard<std::mutex> lock(price_mutex);
+                    if (asset_id == market.token_yes) {
                         ws_best_ask_yes.store(best);
-                    } else if (asset_id == market.token_no && j.contains("asks") && !j["asks"].empty()) {
-                        double best = 1.0;
-                        for (const auto& ask : j["asks"]) {
-                            double price = std::stod(ask["price"].get<std::string>());
-                            if (price < best) best = price;
-                        }
+                    } else if (asset_id == market.token_no) {
                         ws_best_ask_no.store(best);
                     }
                 }
             }
             
-            // Also handle price updates
-            if (j.contains("event_type") && j["event_type"] == "price_change") {
-                std::string asset_id = j.value("asset_id", "");
-                if (j.contains("price")) {
-                    double price = std::stod(j["price"].get<std::string>());
-                    std::lock_guard<std::mutex> lock(price_mutex);
-                    if (asset_id == market.token_yes) {
-                        ws_best_ask_yes.store(price);
-                    } else if (asset_id == market.token_no) {
-                        ws_best_ask_no.store(price);
-                    }
-                }
-            }
         } catch (...) {
             // Ignore parse errors
         } });

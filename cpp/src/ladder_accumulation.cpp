@@ -11,9 +11,9 @@
  * Run: PRIVATE_KEY=0x... FUNDER_ADDRESS=0x... ./build/ladder_accumulation
  */
 
-#include "order_signer.hpp"
-#include "http_client.hpp"
-#include "websocket_client.hpp"
+#include <order_signer.hpp>
+#include <http_client.hpp>
+#include <websocket_client.hpp>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <cstdlib>
@@ -758,18 +758,24 @@ int main(int argc, char *argv[])
         try {
             auto j = json::parse(msg);
             
-            // Handle orderbook updates (event_type: book)
-            if (j.contains("event_type") && j["event_type"] == "book") {
-                std::string asset_id = j.value("asset_id", "");
+            // Polymarket WebSocket format: { topic, type, payload }
+            std::string topic = j.value("topic", "");
+            std::string type = j.value("type", "");
+            
+            // Handle agg_orderbook updates (full orderbook with asks/bids)
+            if (topic == "clob_market" && type == "agg_orderbook") {
+                if (!j.contains("payload")) return;
+                auto payload = j["payload"];
+                std::string asset_id = payload.value("asset_id", "");
                 if (asset_id.empty()) return;
                 
                 auto slug_it = g_token_to_slug.find(asset_id);
                 if (slug_it == g_token_to_slug.end()) return;
                 
-                if (j.contains("asks") && !j["asks"].empty()) {
+                if (payload.contains("asks") && !payload["asks"].empty()) {
                     // Find best (lowest) ask
                     double best_ask = 1.0;
-                    for (const auto& ask : j["asks"]) {
+                    for (const auto& ask : payload["asks"]) {
                         double price = std::stod(ask["price"].get<std::string>());
                         if (price < best_ask) best_ask = price;
                     }
@@ -786,25 +792,6 @@ int main(int argc, char *argv[])
                 }
             }
             
-            // Also handle price_change events
-            if (j.contains("event_type") && j["event_type"] == "price_change") {
-                std::string asset_id = j.value("asset_id", "");
-                if (asset_id.empty()) return;
-                
-                auto slug_it = g_token_to_slug.find(asset_id);
-                if (slug_it == g_token_to_slug.end()) return;
-                
-                if (j.contains("price")) {
-                    double price = std::stod(j["price"].get<std::string>());
-                    auto& market = g_markets[slug_it->second];
-                    if (g_token_to_side[asset_id] == "yes") {
-                        market.best_ask_yes = price;
-                    } else {
-                        market.best_ask_no = price;
-                    }
-                    try_entry(market, cfg, signer, clob_http, creds, funder_address);
-                }
-            }
         } catch (...) {} });
 
     ws.on_connect([&]()
@@ -812,16 +799,20 @@ int main(int argc, char *argv[])
         ws_connected = true;
         std::cout << "    WebSocket connected!\n";
         
-        // Subscribe to all tokens (same format as arb_test)
+        // Subscribe to all tokens (Polymarket format)
         std::vector<std::string> tokens(g_all_tokens.begin(), g_all_tokens.end());
+        json token_array = json::array();
+        for (const auto& t : tokens) token_array.push_back(t);
         
-        json sub_msg;
-        sub_msg["type"] = "subscribe";
-        sub_msg["channel"] = "market";
-        sub_msg["assets_ids"] = tokens;
-        ws.send(sub_msg.dump());
+        // Subscribe to agg_orderbook - gives full orderbook depth for size calculation
+        json subscribe_msg;
+        subscribe_msg["type"] = "subscribe";
+        subscribe_msg["subscriptions"] = json::array({
+            {{"topic", "clob_market"}, {"type", "agg_orderbook"}, {"filters", token_array.dump()}}
+        });
+        ws.send(subscribe_msg.dump());
         
-        std::cout << "    Subscribed to " << tokens.size() << " tokens\n\n"; });
+        std::cout << "    Subscribed to " << tokens.size() << " tokens (agg_orderbook)\n\n"; });
 
     ws.on_disconnect([&]()
                      { ws_connected = false; });

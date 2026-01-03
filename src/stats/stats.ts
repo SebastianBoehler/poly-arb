@@ -23,7 +23,6 @@ let lastPrintAt = Date.now();
 let lastPrintMessages = 0;
 
 let totalMessages = 0;
-let totalPriceChangeEvents = 0;
 let totalBookEvents = 0;
 let totalCombinedSamples = 0;
 let overallHits: ThresholdHits = {};
@@ -119,23 +118,7 @@ async function main() {
       if (!connected) return;
       const { topic, type, payload } = message as { topic: string; type: string; payload: any };
 
-      if (topic === "clob_market" && type === "price_change") {
-        totalPriceChangeEvents += 1;
-        const priceChanges = (payload?.pc || payload?.price_changes) as { a: string; ba?: string; best_ask?: string }[] | undefined;
-        if (!priceChanges) return;
-
-        for (const pc of priceChanges) {
-          const assetId = pc.a || (pc as any).asset_id;
-          const bestAsk = Number(pc.ba ?? (pc as any).best_ask);
-          if (!assetId || !Number.isFinite(bestAsk) || bestAsk <= 0) continue;
-
-          const entry = tokenToMarket.get(assetId);
-          if (!entry) continue;
-
-          applyBestAsk(entry, bestAsk);
-        }
-      }
-
+      // Only use agg_orderbook - it provides full depth and best prices
       if (topic === "clob_market" && type === "agg_orderbook") {
         totalBookEvents += 1;
         const assetId = (payload as any)?.asset_id as string;
@@ -171,25 +154,20 @@ async function main() {
       connected = true;
       activeClient = connectedClient;
       console.log(`[${new Date().toISOString()}] WebSocket connected (previous session: ${uptime}s, disconnects: ${disconnectCount})`);
-      console.log("Subscribing to clob_market price_change...\n");
+      console.log("Subscribing to clob_market agg_orderbook...\n");
 
       // Subscribe in batches to avoid "Invalid request body" error
-      // Subscribe to BOTH price_change AND agg_orderbook for comparison
+      // Only use agg_orderbook - provides full depth for size calculation
       const tokenArray = Array.from(allTokenIds);
       const batchSize = 30;
       for (let i = 0; i < tokenArray.length; i += batchSize) {
         const batch = tokenArray.slice(i, i + batchSize);
-        // price_change - aggregated best prices
-        connectedClient.subscribe({
-          subscriptions: [{ topic: "clob_market", type: "price_change", filters: JSON.stringify(batch) }],
-        });
-        // agg_orderbook - full orderbook (more real-time)
         connectedClient.subscribe({
           subscriptions: [{ topic: "clob_market", type: "agg_orderbook", filters: JSON.stringify(batch) }],
         });
-        console.log(`  Subscribed batch ${Math.floor(i / batchSize) + 1}: ${batch.length} tokens (price_change + agg_orderbook)`);
+        console.log(`  Subscribed batch ${Math.floor(i / batchSize) + 1}: ${batch.length} tokens (agg_orderbook)`);
       }
-      console.log(`\nSubscribed to ${allTokenIds.size} token IDs total (both channels)\n`);
+      console.log(`\nSubscribed to ${allTokenIds.size} token IDs total\n`);
     },
     onStatusChange: (status: ConnectionStatus) => {
       const ts = new Date().toISOString();
@@ -321,12 +299,9 @@ async function main() {
       if (connected && activeClient && allTokenIds.size > 0) {
         const allTokensArray = Array.from(allTokenIds);
         console.log(`Re-subscribing to all ${allTokensArray.length} active tokens...`);
-        // Subscribe in batches of 30
+        // Subscribe in batches of 30 - only agg_orderbook
         for (let i = 0; i < allTokensArray.length; i += 30) {
           const batch = allTokensArray.slice(i, i + 30);
-          activeClient.subscribe({
-            subscriptions: [{ topic: "clob_market", type: "price_change", filters: JSON.stringify(batch) }],
-          });
           activeClient.subscribe({
             subscriptions: [{ topic: "clob_market", type: "agg_orderbook", filters: JSON.stringify(batch) }],
           });
@@ -368,7 +343,7 @@ function printSummary(
   console.log(final ? "==== FINAL SUMMARY ====" : "---- STATS ----");
   console.log(`Markets with samples: ${marketsWithSamples.length}/${marketCount}, samples: ${totalCombinedSamples}`);
   console.log(`Delta since last summary: ${deltaSamples} samples in ${deltaSeconds.toFixed(1)}s ` + `(~${(deltaSamples / deltaSeconds).toFixed(2)} samples/s)`);
-  console.log(`Messages: +${deltaMessages} (price_change: ${totalPriceChangeEvents}, agg_orderbook: ${totalBookEvents})`);
+  console.log(`Messages: +${deltaMessages} (agg_orderbook: ${totalBookEvents})`);
   if (deltaSamples === 0) {
     console.log("⚠️  No new combined samples since last summary (WS idle or system slept?)");
   }
