@@ -8,3 +8,4 @@ output/
 .vscode/
 dist/
 coverage/
+build/

@@ -68,6 +68,19 @@ export type ThresholdHits = Record<number, number>;
 // Tracks sum of prices when threshold is hit, for computing averages
 export type ThresholdPriceSums = Record<number, { sumYes: number; sumNo: number; count: number }>;
 
+// Tracks hits by time-to-expiration bucket (in minutes)
+// Buckets: 0-5, 5-10, 10-15, 15-30, 30-60, 60+
+export type TimeToExpiryHits = Record<number, Record<string, number>>; // threshold -> bucket -> count
+
+// Tracks liquidity (USD available) at each threshold
+export type ThresholdLiquidity = Record<number, { sumUsd: number; count: number; maxUsd: number }>;
+
+// Orderbook level
+export interface OrderbookLevel {
+  price: number;
+  size: number; // shares
+}
+
 export interface StatsMarketTracker {
   market: MarketState;
   timeframe: string;
@@ -76,4 +89,7 @@ export interface StatsMarketTracker {
   hits: ThresholdHits;
   priceSums: ThresholdPriceSums; // Track YES/NO prices when thresholds hit
   lastCombined: number;
+  // Store full orderbook for liquidity analysis
+  asksYes: OrderbookLevel[];
+  asksNo: OrderbookLevel[];
 }

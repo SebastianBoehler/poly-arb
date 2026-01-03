@@ -175,13 +175,17 @@ function printDashboard(marketTrackers: Map<string, MarketTracker>, earliestExpi
 }
 
 const baseSizeUsdc = Number(process.env.BASE_SIZE_USDC) || 5;
-const sizeMultiplier = Number(process.env.SIZE_MULTIPLIER) || 1.2;
+const sizeMultiplier = Number(process.env.SIZE_MULTIPLIER) || 1.5;
 const perSymbolBudgetUsdc = Number(process.env.PER_SYMBOL_BUDGET_USDC) || 100;
-const maxInitialCombined = Number(process.env.MAX_INITIAL_COMBINED) || 0.99;
-const reloadThreshold = Number(process.env.RELOAD_THRESHOLD) || 0.995;
-const minImprovement = Number(process.env.MIN_IMPROVEMENT) || 0.002;
+const maxInitialCombined = Number(process.env.MAX_INITIAL_COMBINED) || 1.01;
+const ladderStep = Number(process.env.LADDER_STEP) || 0.01;
+const minUsdPerLeg = Number(process.env.MIN_USD_PER_LEG) || 0.1;
 const fee = 0.02;
 const symbolSpend = new Map<string, number>();
+
+// Track actual fills per market (simulating sequential leg placement)
+type LegFills = { yesShares: number; yesCost: number; noShares: number; noCost: number; pendingSide: "yes" | "no" | null };
+const actualFills = new Map<string, LegFills>();
 
 function computeMetrics(state: MarketState) {
   const avgYes = state.totalSharesYes > 0 ? state.totalCostYes / state.totalSharesYes : 0;
@@ -203,6 +207,13 @@ export function __setSymbolSpend(symbol: string, value: number): void {
   symbolSpend.set(symbol, value);
 }
 
+/**
+ * Laddering approach: place legs sequentially, wait for profitable second leg.
+ * - First entry: place YES when combined <= maxInitialCombined
+ * - Then wait for NO price such that avgYes + bestAskNo < 1.0
+ * - Can average down on first side (up to 2 orders) before requiring balance
+ * - Subsequent ladder levels when combined drops by ladderStep
+ */
 export function tryEntry(m: MarketState): void {
   if (m.bestAskYes <= 0 || m.bestAskNo <= 0) return;
 
@@ -210,52 +221,142 @@ export function tryEntry(m: MarketState): void {
   if (currentCombined < m.lowestCombined) m.lowestCombined = currentCombined;
   if (currentCombined > m.highestCombined) m.highestCombined = currentCombined;
 
-  let shouldEnter = false;
-  let entrySize = baseSizeUsdc;
+  const currentSymbolSpend = symbolSpend.get(m.symbol) ?? 0;
+  const remainingBudget = perSymbolBudgetUsdc - currentSymbolSpend;
+  if (remainingBudget < minUsdPerLeg) return;
 
-  if (m.entryCount === 0) {
+  let fills = actualFills.get(m.slug);
+  if (!fills) {
+    fills = { yesShares: 0, yesCost: 0, noShares: 0, noCost: 0, pendingSide: null };
+    actualFills.set(m.slug, fills);
+  }
+
+  const avgYes = fills.yesShares > 0 ? fills.yesCost / fills.yesShares : 0;
+  const avgNo = fills.noShares > 0 ? fills.noCost / fills.noShares : 0;
+
+  let side: "yes" | "no" | null = null;
+  let amountUsd = minUsdPerLeg;
+
+  const maxFirstSideOrders = 2;
+  const firstSideCount =
+    fills.yesShares > 0 && fills.noShares === 0
+      ? Math.ceil(fills.yesCost / minUsdPerLeg)
+      : fills.noShares > 0 && fills.yesShares === 0
+        ? Math.ceil(fills.noCost / minUsdPerLeg)
+        : 0;
+
+  if (fills.yesShares === 0 && fills.noShares === 0) {
+    // First entry - place on YES if combined <= threshold
     if (currentCombined <= maxInitialCombined) {
-      shouldEnter = true;
+      side = "yes";
+      amountUsd = minUsdPerLeg;
       m.ladderLevel = 1;
     }
+  } else if (fills.yesShares > 0 && fills.noShares === 0 && firstSideCount < maxFirstSideOrders) {
+    // Can still average down YES before needing NO
+    if (m.bestAskYes < avgYes) {
+      side = "yes";
+      amountUsd = minUsdPerLeg;
+    } else {
+      // Try to get NO at profitable price
+      const maxNoPrice = 1.0 - avgYes;
+      if (m.bestAskNo <= maxNoPrice) {
+        side = "no";
+        amountUsd = Math.min(fills.yesCost, remainingBudget);
+        if (amountUsd < minUsdPerLeg) amountUsd = minUsdPerLeg;
+      } else {
+        fills.pendingSide = "no"; // waiting
+      }
+    }
+  } else if (fills.yesShares > 0 && fills.noShares === 0) {
+    // Have YES, need NO - match bet amount
+    const maxNoPrice = 1.0 - avgYes;
+    if (m.bestAskNo <= maxNoPrice) {
+      side = "no";
+      amountUsd = Math.min(fills.yesCost, remainingBudget);
+      if (amountUsd < minUsdPerLeg) amountUsd = minUsdPerLeg;
+    } else {
+      fills.pendingSide = "no"; // waiting
+    }
+  } else if (fills.noShares > 0 && fills.yesShares === 0) {
+    // Have NO, need YES - match bet amount
+    const maxYesPrice = 1.0 - avgNo;
+    if (m.bestAskYes <= maxYesPrice) {
+      side = "yes";
+      amountUsd = Math.min(fills.noCost, remainingBudget);
+      if (amountUsd < minUsdPerLeg) amountUsd = minUsdPerLeg;
+    } else {
+      fills.pendingSide = "yes"; // waiting
+    }
   } else {
-    const improvement = m.lastEntryCombined - currentCombined;
-    const meetsThreshold = currentCombined <= reloadThreshold;
-    const improvedEnough = improvement >= minImprovement;
-    if (meetsThreshold && improvedEnough) {
-      shouldEnter = true;
-      m.ladderLevel++;
-      entrySize = baseSizeUsdc * Math.pow(sizeMultiplier, m.ladderLevel - 1);
+    // Have both sides - check if balanced and can improve
+    const currentAvgCombined = avgYes + avgNo;
+    const costImbalance = Math.abs(fills.yesCost - fills.noCost);
+    const minCost = Math.min(fills.yesCost, fills.noCost);
+
+    // Rebalance if > 10% difference
+    if (costImbalance > minCost * 0.1) {
+      if (fills.yesCost > fills.noCost) {
+        const maxNoPrice = 1.0 - avgYes;
+        if (m.bestAskNo <= maxNoPrice) {
+          side = "no";
+          amountUsd = Math.min(fills.yesCost - fills.noCost, remainingBudget);
+          if (amountUsd < minUsdPerLeg) amountUsd = minUsdPerLeg;
+        }
+      } else {
+        const maxYesPrice = 1.0 - avgNo;
+        if (m.bestAskYes <= maxYesPrice) {
+          side = "yes";
+          amountUsd = Math.min(fills.noCost - fills.yesCost, remainingBudget);
+          if (amountUsd < minUsdPerLeg) amountUsd = minUsdPerLeg;
+        }
+      }
+    } else if (currentAvgCombined >= 1.0) {
+      // Balanced but combined >= 1, average down
+      const yesImprovement = avgYes - m.bestAskYes;
+      const noImprovement = avgNo - m.bestAskNo;
+      if (yesImprovement > noImprovement && yesImprovement > 0) {
+        side = "yes";
+        amountUsd = minUsdPerLeg;
+      } else if (noImprovement > 0) {
+        side = "no";
+        amountUsd = minUsdPerLeg;
+      }
+    } else {
+      // Combined < 1 and balanced - check for ladder reload
+      const combinedDrop = m.lastEntryCombined - currentCombined;
+      if (combinedDrop >= ladderStep && currentCombined <= maxInitialCombined) {
+        m.ladderLevel++;
+        side = "yes";
+        amountUsd = baseSizeUsdc * Math.pow(sizeMultiplier, m.ladderLevel - 1);
+      }
     }
   }
 
-  if (!shouldEnter) return;
+  if (!side) return;
 
-  // Buy EQUAL shares on both sides (required for arb to cancel out)
-  // entrySize is the USD budget; buy shares such that both sides have equal count
-  const costPerPair = m.bestAskYes + m.bestAskNo; // cost to buy 1 YES + 1 NO
-  if (costPerPair <= 0) return;
+  // Simulate fill
+  const price = side === "yes" ? m.bestAskYes : m.bestAskNo;
+  const shares = amountUsd / price;
 
-  const currentSymbolSpend = symbolSpend.get(m.symbol) ?? 0;
-  const remainingBudget = perSymbolBudgetUsdc - currentSymbolSpend;
-  if (remainingBudget <= 0) return;
+  if (side === "yes") {
+    fills.yesShares += shares;
+    fills.yesCost += amountUsd;
+  } else {
+    fills.noShares += shares;
+    fills.noCost += amountUsd;
+  }
+  fills.pendingSide = null;
+  actualFills.set(m.slug, fills);
+  symbolSpend.set(m.symbol, currentSymbolSpend + amountUsd);
 
-  const sharesToBuy = Math.min(entrySize / costPerPair, remainingBudget / costPerPair); // number of pairs we can afford
-  if (sharesToBuy <= 0) return;
-
-  const costYes = sharesToBuy * m.bestAskYes;
-  const costNo = sharesToBuy * m.bestAskNo;
-  const totalCost = costYes + costNo;
-
-  m.totalCostYes += costYes;
-  m.totalSharesYes += sharesToBuy;
-  m.totalCostNo += costNo;
-  m.totalSharesNo += sharesToBuy;
-  m.entryCount++;
+  // Update market state
+  m.totalSharesYes = fills.yesShares;
+  m.totalCostYes = fills.yesCost;
+  m.totalSharesNo = fills.noShares;
+  m.totalCostNo = fills.noCost;
+  m.entryCount = Math.min(fills.yesShares, fills.noShares) > 0 ? 1 : 0;
   m.lastEntryCombined = currentCombined;
-  symbolSpend.set(m.symbol, currentSymbolSpend + totalCost);
-
-  // Dashboard will show updated positions
 }
 
 async function main() {
@@ -288,7 +389,7 @@ async function main() {
   console.log(`=== REAL-TIME LADDER ACCUMULATION ===`);
   console.log(`Markets: ${marketTrackers.size}, Token IDs: ${allTokenIds.size}`);
   console.log(`Earliest expiry: ${formatExpiry(earliestExpiry)} UTC`);
-  console.log(`Entry: first <= ${maxInitialCombined}, reload <= ${reloadThreshold}, min improve ${minImprovement}`);
+  console.log(`Entry: first <= ${maxInitialCombined}, ladder step ${ladderStep}, min/leg $${minUsdPerLeg}`);
   console.log(`Base size: $${baseSizeUsdc}, Multiplier: ${sizeMultiplier}x, Fee: ${fee * 100}%`);
   console.log(`\nConnecting to WebSocket...\n`);
 

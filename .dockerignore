@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (will be installed in container)
+node_modules
+
+# Build outputs
+dist
+*.tsbuildinfo
+cpp/build/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files (secrets - pass via docker run -e or docker-compose)
+.env
+.env.*
+!.env.example
+
+# Data and output files
+data/
+plots/
+*.csv
+*.log
+
+# Documentation
+*.md
+LICENSE
+
+# Tests (not needed in production)
+tests/
+*.test.ts
+*.spec.ts
+
+# Scripts (analysis, not needed for runtime)
+scripts/
+
+# GitHub workflows
+.github/
+
+# Docker files (no need to copy into image)
+Dockerfile
+docker-compose*.yml

@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  # C++ arb_test (low-latency)
+  arb-cpp:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpp
+    container_name: poly-arb-cpp
+    restart: unless-stopped
+    environment:
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - FUNDER_ADDRESS=${FUNDER_ADDRESS}
+      - SIGNATURE_TYPE=${SIGNATURE_TYPE:-2}
+      - SIZE_USDC=${SIZE_USDC:-5}
+      - TRIGGER_COMBINED=${TRIGGER_COMBINED:-0.995}
+      - MAX_COMBINED=${MAX_COMBINED:-0.999}
+      - DRY_RUN=${DRY_RUN:-true}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128M
+        reservations:
+          cpus: "0.25"
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

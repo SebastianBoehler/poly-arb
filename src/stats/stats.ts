@@ -14,8 +14,8 @@
 import { RealTimeDataClient, ConnectionStatus } from "@polymarket/real-time-data-client";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { fetchCrypto15mMarkets, fetchCrypto1hMarkets, fetchCrypto4hMarkets } from "../core/gamma";
-import type { MarketState, StatsMarketTracker, ThresholdHits, ThresholdPriceSums } from "../core/types";
-import { bumpThresholdHits, bumpThresholdPriceSums } from "./utils";
+import type { MarketState, StatsMarketTracker, ThresholdHits, ThresholdPriceSums, TimeToExpiryHits, ThresholdLiquidity, OrderbookLevel } from "../core/types";
+import { bumpThresholdHits, bumpThresholdPriceSums, getExpiryBucket, bumpTimeToExpiryHits } from "./utils";
 import { getMarketExpiry, formatExpiry, extractSymbol } from "../core/utils";
 
 let lastPrintSamples = 0;
@@ -28,6 +28,8 @@ let totalBookEvents = 0;
 let totalCombinedSamples = 0;
 let overallHits: ThresholdHits = {};
 let overallPriceSums: ThresholdPriceSums = {};
+let overallExpiryHits: TimeToExpiryHits = {};
+let overallLiquidity: ThresholdLiquidity = {};
 
 // Preserve historical per-symbol stats when markets expire
 const historicalSymbolStats = new Map<string, { samples: number; hits: ThresholdHits; priceSums: ThresholdPriceSums }>();
@@ -81,6 +83,8 @@ async function main() {
       hits: {},
       priceSums: {},
       lastCombined: Number.POSITIVE_INFINITY,
+      asksYes: [],
+      asksNo: [],
     };
     tokenToMarket.set(m.tokenYes, { market: tracker, side: "yes" });
     tokenToMarket.set(m.tokenNo, { market: tracker, side: "no" });
@@ -135,13 +139,29 @@ async function main() {
       if (topic === "clob_market" && type === "agg_orderbook") {
         totalBookEvents += 1;
         const assetId = (payload as any)?.asset_id as string;
-        const asks = (payload as any)?.asks as { price: string }[] | undefined;
+        const asks = (payload as any)?.asks as { price: string; size: string }[] | undefined;
         if (!assetId || !asks || asks.length === 0) return;
-        const bestAsk = Math.min(...asks.map((a) => Number(a.price)));
-        if (!Number.isFinite(bestAsk) || bestAsk <= 0) return;
+
         const entry = tokenToMarket.get(assetId);
         if (!entry) return;
-        applyBestAsk(entry, bestAsk);
+
+        // Parse and store full orderbook
+        const parsedAsks: OrderbookLevel[] = asks
+          .map((a) => ({
+            price: Number(a.price),
+            size: Number(a.size),
+          }))
+          .filter((a) => Number.isFinite(a.price) && Number.isFinite(a.size) && a.price > 0);
+
+        if (entry.side === "yes") {
+          entry.market.asksYes = parsedAsks;
+        } else {
+          entry.market.asksNo = parsedAsks;
+        }
+
+        const bestAsk = Math.min(...parsedAsks.map((a) => a.price));
+        if (!Number.isFinite(bestAsk) || bestAsk <= 0) return;
+        applyBestAskWithLiquidity(entry, bestAsk);
       }
     },
     onConnect: (connectedClient: RealTimeDataClient) => {
@@ -154,16 +174,22 @@ async function main() {
       console.log("Subscribing to clob_market price_change...\n");
 
       // Subscribe in batches to avoid "Invalid request body" error
+      // Subscribe to BOTH price_change AND agg_orderbook for comparison
       const tokenArray = Array.from(allTokenIds);
       const batchSize = 30;
       for (let i = 0; i < tokenArray.length; i += batchSize) {
         const batch = tokenArray.slice(i, i + batchSize);
+        // price_change - aggregated best prices
         connectedClient.subscribe({
           subscriptions: [{ topic: "clob_market", type: "price_change", filters: JSON.stringify(batch) }],
         });
-        console.log(`  Subscribed batch ${Math.floor(i / batchSize) + 1}: ${batch.length} tokens`);
+        // agg_orderbook - full orderbook (more real-time)
+        connectedClient.subscribe({
+          subscriptions: [{ topic: "clob_market", type: "agg_orderbook", filters: JSON.stringify(batch) }],
+        });
+        console.log(`  Subscribed batch ${Math.floor(i / batchSize) + 1}: ${batch.length} tokens (price_change + agg_orderbook)`);
       }
-      console.log(`\nSubscribed to ${allTokenIds.size} token IDs total\n`);
+      console.log(`\nSubscribed to ${allTokenIds.size} token IDs total (both channels)\n`);
     },
     onStatusChange: (status: ConnectionStatus) => {
       const ts = new Date().toISOString();
@@ -268,6 +294,8 @@ async function main() {
             hits: {},
             priceSums: {},
             lastCombined: Number.POSITIVE_INFINITY,
+            asksYes: [],
+            asksNo: [],
           };
           marketTrackers.set(m.slug, tracker);
           if (!allTokenIds.has(m.tokenYes)) {
@@ -298,6 +326,9 @@ async function main() {
           const batch = allTokensArray.slice(i, i + 30);
           activeClient.subscribe({
             subscriptions: [{ topic: "clob_market", type: "price_change", filters: JSON.stringify(batch) }],
+          });
+          activeClient.subscribe({
+            subscriptions: [{ topic: "clob_market", type: "agg_orderbook", filters: JSON.stringify(batch) }],
           });
         }
       }
@@ -356,6 +387,35 @@ function printSummary(
     .join(" | ");
   console.log(`Threshold hits: ${hitLines}`);
 
+  // Print time-to-expiry distribution for key thresholds
+  const keyThresholds = [0.98, 0.99, 1];
+  for (const th of keyThresholds) {
+    if (!overallExpiryHits[th]) continue;
+    const bucketHits = overallExpiryHits[th];
+    const totalForTh = Object.values(bucketHits).reduce((a, b) => a + b, 0);
+    if (totalForTh === 0) continue;
+    const bucketStr = ["0-5", "5-10", "10-15", "15-30", "30-60", "60+"]
+      .map((b) => {
+        const count = bucketHits[b] || 0;
+        const pct = totalForTh > 0 ? ((count / totalForTh) * 100).toFixed(1) : "0";
+        return `${b}min:${count}(${pct}%)`;
+      })
+      .join(" ");
+    console.log(`  <=${th} by expiry: ${bucketStr}`);
+  }
+
+  // Print liquidity stats for key thresholds
+  console.log("\nLiquidity at thresholds (USD available):");
+  for (const th of keyThresholds) {
+    const liq = overallLiquidity[th];
+    if (!liq || liq.count === 0) {
+      console.log(`  <=${th}: no data`);
+      continue;
+    }
+    const avgUsd = (liq.sumUsd / liq.count).toFixed(2);
+    console.log(`  <=${th}: avg=$${avgUsd}, max=$${liq.maxUsd.toFixed(2)}, samples=${liq.count}`);
+  }
+
   const lowestCombos = trackers
     .filter((t) => Number.isFinite(t.lastCombined))
     .sort((a, b) => a.lastCombined - b.lastCombined)
@@ -413,6 +473,86 @@ function applyBestAsk(entry: { market: StatsMarketTracker; side: "yes" | "no" },
     // Track YES/NO prices when thresholds are hit
     bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, entry.market.priceSums);
     bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, overallPriceSums);
+    // Track by time-to-expiration bucket
+    bumpTimeToExpiryHits(combined, entry.market.expiresAt, thresholds, overallExpiryHits);
+  }
+}
+
+// Calculate USD available at each threshold level using full orderbook
+function calculateLiquidityAtThreshold(asksYes: OrderbookLevel[], asksNo: OrderbookLevel[], threshold: number): number {
+  if (asksYes.length === 0 || asksNo.length === 0) return 0;
+
+  // Sort asks by price ascending
+  const sortedYes = [...asksYes].sort((a, b) => a.price - b.price);
+  const sortedNo = [...asksNo].sort((a, b) => a.price - b.price);
+
+  let totalUsd = 0;
+  let yesIdx = 0;
+  let noIdx = 0;
+
+  // Find pairs where combined price <= threshold
+  while (yesIdx < sortedYes.length && noIdx < sortedNo.length) {
+    const yesLevel = sortedYes[yesIdx];
+    const noLevel = sortedNo[noIdx];
+    const combined = yesLevel.price + noLevel.price;
+
+    if (combined <= threshold) {
+      // Can buy at this combined price - take min shares available
+      const shares = Math.min(yesLevel.size, noLevel.size);
+      const usd = shares * combined; // approximate USD value
+      totalUsd += usd;
+
+      // Consume the smaller side
+      if (yesLevel.size <= noLevel.size) {
+        sortedNo[noIdx] = { ...noLevel, size: noLevel.size - shares };
+        yesIdx++;
+      } else {
+        sortedYes[yesIdx] = { ...yesLevel, size: yesLevel.size - shares };
+        noIdx++;
+      }
+    } else {
+      // Combined too high, try next level on cheaper side
+      if (yesLevel.price < noLevel.price) {
+        yesIdx++;
+      } else {
+        noIdx++;
+      }
+    }
+  }
+
+  return totalUsd;
+}
+
+function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "yes" | "no" }, bestAsk: number) {
+  if (entry.side === "yes") entry.market.market.bestAskYes = bestAsk;
+  else entry.market.market.bestAskNo = bestAsk;
+
+  const { bestAskYes, bestAskNo } = entry.market.market;
+  if (bestAskYes > 0 && bestAskNo > 0) {
+    const combined = bestAskYes + bestAskNo;
+    entry.market.lastCombined = Math.min(entry.market.lastCombined, combined);
+    entry.market.updates += 1;
+    totalCombinedSamples += 1;
+    bumpThresholdHits(combined, thresholds, entry.market.hits);
+    bumpThresholdHits(combined, thresholds, overallHits);
+    bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, entry.market.priceSums);
+    bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, overallPriceSums);
+    bumpTimeToExpiryHits(combined, entry.market.expiresAt, thresholds, overallExpiryHits);
+
+    // Calculate liquidity at each threshold when we have orderbook data
+    if (entry.market.asksYes.length > 0 && entry.market.asksNo.length > 0) {
+      for (const th of thresholds) {
+        if (combined <= th) {
+          const usd = calculateLiquidityAtThreshold(entry.market.asksYes, entry.market.asksNo, th);
+          if (!overallLiquidity[th]) {
+            overallLiquidity[th] = { sumUsd: 0, count: 0, maxUsd: 0 };
+          }
+          overallLiquidity[th].sumUsd += usd;
+          overallLiquidity[th].count += 1;
+          overallLiquidity[th].maxUsd = Math.max(overallLiquidity[th].maxUsd, usd);
+        }
+      }
+    }
   }
 }
 
@@ -474,6 +614,54 @@ function writeCsvSummary(
   buf += makeLine("all", "", "", totalSamples, hits, priceSums);
   for (const s of symbolStats) {
     buf += makeLine("symbol", s.symbol, s.timeframe, s.samples, s.hits, s.priceSums);
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
+
+  // Write time bucket data to separate CSV
+  writeTimeBucketCsv(path.replace(".csv", "-buckets.csv"), ts);
+  // Write liquidity data to separate CSV
+  writeLiquidityCsv(path.replace(".csv", "-liquidity.csv"), ts);
+}
+
+function writeTimeBucketCsv(path: string, ts: string) {
+  const buckets = ["0-5", "5-10", "10-15", "15-30", "30-60", "60+"];
+
+  // Ensure header exists
+  const header = ["timestamp", "threshold", ...buckets.map((b) => `hits_${b}min`), ...buckets.map((b) => `pct_${b}min`)].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  let buf = "";
+  for (const th of thresholds) {
+    if (!overallExpiryHits[th]) continue;
+    const bucketHits = overallExpiryHits[th];
+    const totalForTh = Object.values(bucketHits).reduce((a, b) => a + b, 0);
+    if (totalForTh === 0) continue;
+
+    const hitValues = buckets.map((b) => (bucketHits[b] || 0).toString());
+    const pctValues = buckets.map((b) => {
+      const count = bucketHits[b] || 0;
+      return totalForTh > 0 ? ((count / totalForTh) * 100).toFixed(2) : "0";
+    });
+    buf += [ts, th.toString(), ...hitValues, ...pctValues].join(",") + "\n";
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
+}
+
+function writeLiquidityCsv(path: string, ts: string) {
+  // Ensure header exists
+  const header = ["timestamp", "threshold", "avg_usd", "max_usd", "samples"].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  let buf = "";
+  for (const th of thresholds) {
+    const liq = overallLiquidity[th];
+    if (!liq || liq.count === 0) continue;
+    const avgUsd = (liq.sumUsd / liq.count).toFixed(2);
+    buf += [ts, th.toString(), avgUsd, liq.maxUsd.toFixed(2), liq.count.toString()].join(",") + "\n";
   }
   appendFileSync(path, buf, { encoding: "utf8" });
 }

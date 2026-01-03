@@ -1,4 +1,31 @@
-import type { ThresholdPriceSums } from "../core/types";
+import type { ThresholdPriceSums, TimeToExpiryHits } from "../core/types";
+
+// Time-to-expiry buckets in minutes
+export const EXPIRY_BUCKETS = ["0-5", "5-10", "10-15", "15-30", "30-60", "60+"] as const;
+
+export function getExpiryBucket(expiresAt: number): string {
+  const now = Date.now();
+  const minutesLeft = Math.max(0, (expiresAt - now) / 60000);
+
+  if (minutesLeft <= 5) return "0-5";
+  if (minutesLeft <= 10) return "5-10";
+  if (minutesLeft <= 15) return "10-15";
+  if (minutesLeft <= 30) return "15-30";
+  if (minutesLeft <= 60) return "30-60";
+  return "60+";
+}
+
+export function bumpTimeToExpiryHits(combined: number, expiresAt: number, thresholds: number[], hits: TimeToExpiryHits): TimeToExpiryHits {
+  const bucket = getExpiryBucket(expiresAt);
+  for (const t of thresholds) {
+    if (!hits[t]) hits[t] = {};
+    if (!hits[t][bucket]) hits[t][bucket] = 0;
+    if (combined <= t) {
+      hits[t][bucket] += 1;
+    }
+  }
+  return hits;
+}
 
 export function bumpThresholdHits(value: number, thresholds: number[], hits: Record<number, number>): Record<number, number> {
   for (const t of thresholds) {
