@@ -33,7 +33,7 @@ let overallLiquidity: ThresholdLiquidity = {};
 // Preserve historical per-symbol stats when markets expire
 const historicalSymbolStats = new Map<string, { samples: number; hits: ThresholdHits; priceSums: ThresholdPriceSums }>();
 
-const thresholds = (process.env.STATS_THRESHOLDS || "1,0.995,0.99,0.985,0.98,0.95,0.9")
+const thresholds = (process.env.STATS_THRESHOLDS || "0.995,0.99,0.985,0.98,0.95,0.9")
   .split(",")
   .map((t) => Number(t.trim()))
   .filter((t) => !Number.isNaN(t))
