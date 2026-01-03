@@ -3,14 +3,17 @@ set -e
 
 # GCloud deployment script for Polymarket C++ Arbitrage Bot
 # Polymarket servers: eu-west-2 (London), closest non-georestricted: eu-west-1 (Ireland)
-# Default: europe-west2 (London) for lowest latency
+# Default: europe-west4 (Netherlands) for lowest latency to Polymarket
 
 # Configuration
 PROJECT_ID="${GCP_PROJECT_ID:-}"
 INSTANCE_NAME="${INSTANCE_NAME:-poly-arb-bot}"
-ZONE="${ZONE:-europe-west2-a}"
+ZONE="${ZONE:-europe-west4-a}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-medium}"
 IMAGE_NAME="poly-arb-cpp"
+
+# Residential proxy (for Cloudflare bypass)
+PROXY_URL="${HTTP_PROXY:-}"
 
 # Colors
 RED='\033[0;31m'
@@ -198,7 +201,7 @@ case "${1:-}" in
         echo "Environment variables:"
         echo "  GCP_PROJECT_ID    GCP project ID"
         echo "  INSTANCE_NAME     GCE instance name (default: poly-arb-bot)"
-        echo "  ZONE              GCE zone (default: us-east1-b)"
+        echo "  ZONE              GCE zone (default: europe-west4-a)"
         echo "  MACHINE_TYPE      GCE machine type (default: e2-small)"
         echo "  PRIVATE_KEY       Wallet private key"
         echo "  FUNDER_ADDRESS    Funder address"

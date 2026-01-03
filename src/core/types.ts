@@ -75,6 +75,15 @@ export type TimeToExpiryHits = Record<number, Record<string, number>>; // thresh
 // Tracks liquidity (USD available) at each threshold
 export type ThresholdLiquidity = Record<number, { sumUsd: number; count: number; maxUsd: number }>;
 
+// Tracks opportunity duration (how long combined price stays below threshold)
+export type ThresholdDuration = Record<number, { sumMs: number; count: number; maxMs: number; minMs: number }>;
+
+// Active opportunity state for a market at a specific threshold
+export interface ActiveOpportunity {
+  startedAt: number; // timestamp when opportunity started
+  threshold: number;
+}
+
 // Orderbook level
 export interface OrderbookLevel {
   price: number;
@@ -92,4 +101,6 @@ export interface StatsMarketTracker {
   // Store full orderbook for liquidity analysis
   asksYes: OrderbookLevel[];
   asksNo: OrderbookLevel[];
+  // Track active opportunities per threshold (for duration measurement)
+  activeOpportunities: Map<number, number>; // threshold -> startedAt timestamp
 }

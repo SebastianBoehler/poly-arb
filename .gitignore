@@ -9,3 +9,4 @@ output/
 dist/
 coverage/
 build/
+*.pyc

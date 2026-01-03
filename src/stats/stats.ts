@@ -14,7 +14,16 @@
 import { RealTimeDataClient, ConnectionStatus } from "@polymarket/real-time-data-client";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { fetchCrypto15mMarkets, fetchCrypto1hMarkets, fetchCrypto4hMarkets } from "../core/gamma";
-import type { MarketState, StatsMarketTracker, ThresholdHits, ThresholdPriceSums, TimeToExpiryHits, ThresholdLiquidity, OrderbookLevel } from "../core/types";
+import type {
+  MarketState,
+  StatsMarketTracker,
+  ThresholdHits,
+  ThresholdPriceSums,
+  TimeToExpiryHits,
+  ThresholdLiquidity,
+  ThresholdDuration,
+  OrderbookLevel,
+} from "../core/types";
 import { bumpThresholdHits, bumpThresholdPriceSums, getExpiryBucket, bumpTimeToExpiryHits } from "./utils";
 import { getMarketExpiry, formatExpiry, extractSymbol } from "../core/utils";
 
@@ -29,6 +38,7 @@ let overallHits: ThresholdHits = {};
 let overallPriceSums: ThresholdPriceSums = {};
 let overallExpiryHits: TimeToExpiryHits = {};
 let overallLiquidity: ThresholdLiquidity = {};
+let overallDuration: ThresholdDuration = {};
 
 // Preserve historical per-symbol stats when markets expire
 const historicalSymbolStats = new Map<string, { samples: number; hits: ThresholdHits; priceSums: ThresholdPriceSums }>();
@@ -84,6 +94,7 @@ async function main() {
       lastCombined: Number.POSITIVE_INFINITY,
       asksYes: [],
       asksNo: [],
+      activeOpportunities: new Map(),
     };
     tokenToMarket.set(m.tokenYes, { market: tracker, side: "yes" });
     tokenToMarket.set(m.tokenNo, { market: tracker, side: "no" });
@@ -274,6 +285,7 @@ async function main() {
             lastCombined: Number.POSITIVE_INFINITY,
             asksYes: [],
             asksNo: [],
+            activeOpportunities: new Map(),
           };
           marketTrackers.set(m.slug, tracker);
           if (!allTokenIds.has(m.tokenYes)) {
@@ -391,6 +403,19 @@ function printSummary(
     console.log(`  <=${th}: avg=$${avgUsd}, max=$${liq.maxUsd.toFixed(2)}, samples=${liq.count}`);
   }
 
+  // Print opportunity duration stats
+  console.log("\nOpportunity duration (how long arb window stayed open):");
+  for (const th of keyThresholds) {
+    const dur = overallDuration[th];
+    if (!dur || dur.count === 0) {
+      console.log(`  <=${th}: no completed opportunities`);
+      continue;
+    }
+    const avgMs = dur.sumMs / dur.count;
+    const minMs = dur.minMs === Number.POSITIVE_INFINITY ? 0 : dur.minMs;
+    console.log(`  <=${th}: avg=${avgMs.toFixed(0)}ms, min=${minMs.toFixed(0)}ms, max=${dur.maxMs.toFixed(0)}ms, count=${dur.count}`);
+  }
+
   const lowestCombos = trackers
     .filter((t) => Number.isFinite(t.lastCombined))
     .sort((a, b) => a.lastCombined - b.lastCombined)
@@ -431,26 +456,6 @@ function ensureCsvHeader(path: string, ths: number[]) {
     }
   }
   writeFileSync(path, expectedHeader, { encoding: "utf8" });
-}
-
-function applyBestAsk(entry: { market: StatsMarketTracker; side: "yes" | "no" }, bestAsk: number) {
-  if (entry.side === "yes") entry.market.market.bestAskYes = bestAsk;
-  else entry.market.market.bestAskNo = bestAsk;
-
-  const { bestAskYes, bestAskNo } = entry.market.market;
-  if (bestAskYes > 0 && bestAskNo > 0) {
-    const combined = bestAskYes + bestAskNo;
-    entry.market.lastCombined = Math.min(entry.market.lastCombined, combined);
-    entry.market.updates += 1;
-    totalCombinedSamples += 1;
-    bumpThresholdHits(combined, thresholds, entry.market.hits);
-    bumpThresholdHits(combined, thresholds, overallHits);
-    // Track YES/NO prices when thresholds are hit
-    bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, entry.market.priceSums);
-    bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, overallPriceSums);
-    // Track by time-to-expiration bucket
-    bumpTimeToExpiryHits(combined, entry.market.expiresAt, thresholds, overallExpiryHits);
-  }
 }
 
 // Calculate USD available at each threshold level using full orderbook
@@ -505,6 +510,7 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
   const { bestAskYes, bestAskNo } = entry.market.market;
   if (bestAskYes > 0 && bestAskNo > 0) {
     const combined = bestAskYes + bestAskNo;
+    const now = Date.now();
     entry.market.lastCombined = Math.min(entry.market.lastCombined, combined);
     entry.market.updates += 1;
     totalCombinedSamples += 1;
@@ -513,6 +519,31 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
     bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, entry.market.priceSums);
     bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, overallPriceSums);
     bumpTimeToExpiryHits(combined, entry.market.expiresAt, thresholds, overallExpiryHits);
+
+    // Track opportunity duration per threshold
+    for (const th of thresholds) {
+      const isOpportunity = combined <= th;
+      const wasActive = entry.market.activeOpportunities.has(th);
+
+      if (isOpportunity && !wasActive) {
+        // Opportunity just started
+        entry.market.activeOpportunities.set(th, now);
+      } else if (!isOpportunity && wasActive) {
+        // Opportunity just ended - record duration
+        const startedAt = entry.market.activeOpportunities.get(th)!;
+        const durationMs = now - startedAt;
+        entry.market.activeOpportunities.delete(th);
+
+        if (!overallDuration[th]) {
+          overallDuration[th] = { sumMs: 0, count: 0, maxMs: 0, minMs: Number.POSITIVE_INFINITY };
+        }
+        overallDuration[th].sumMs += durationMs;
+        overallDuration[th].count += 1;
+        overallDuration[th].maxMs = Math.max(overallDuration[th].maxMs, durationMs);
+        overallDuration[th].minMs = Math.min(overallDuration[th].minMs, durationMs);
+      }
+      // If still active (isOpportunity && wasActive), keep tracking
+    }
 
     // Calculate liquidity at each threshold when we have orderbook data
     if (entry.market.asksYes.length > 0 && entry.market.asksNo.length > 0) {
@@ -596,6 +627,8 @@ function writeCsvSummary(
   writeTimeBucketCsv(path.replace(".csv", "-buckets.csv"), ts);
   // Write liquidity data to separate CSV
   writeLiquidityCsv(path.replace(".csv", "-liquidity.csv"), ts);
+  // Write duration data to separate CSV
+  writeDurationCsv(path.replace(".csv", "-duration.csv"), ts);
 }
 
 function writeTimeBucketCsv(path: string, ts: string) {
@@ -637,6 +670,24 @@ function writeLiquidityCsv(path: string, ts: string) {
     if (!liq || liq.count === 0) continue;
     const avgUsd = (liq.sumUsd / liq.count).toFixed(2);
     buf += [ts, th.toString(), avgUsd, liq.maxUsd.toFixed(2), liq.count.toString()].join(",") + "\n";
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
+}
+
+function writeDurationCsv(path: string, ts: string) {
+  // Ensure header exists
+  const header = ["timestamp", "threshold", "avg_ms", "min_ms", "max_ms", "count"].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  let buf = "";
+  for (const th of thresholds) {
+    const dur = overallDuration[th];
+    if (!dur || dur.count === 0) continue;
+    const avgMs = (dur.sumMs / dur.count).toFixed(0);
+    const minMs = dur.minMs === Number.POSITIVE_INFINITY ? "0" : dur.minMs.toFixed(0);
+    buf += [ts, th.toString(), avgMs, minMs, dur.maxMs.toFixed(0), dur.count.toString()].join(",") + "\n";
   }
   appendFileSync(path, buf, { encoding: "utf8" });
 }

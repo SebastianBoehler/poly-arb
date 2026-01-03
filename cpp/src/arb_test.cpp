@@ -2,7 +2,7 @@
  * C++ Arbitrage Test - Batch Order Placement
  *
  * Places YES and NO orders simultaneously using batch API for arb strategy.
- * Tests combined price < 1 opportunities on BTC 15m markets.
+ * Tests combined price < 1 opportunities on ETH 15m markets.
  *
  * Build: cmake --build build --target arb_test
  * Run: PRIVATE_KEY=0x... FUNDER_ADDRESS=0x... ./build/arb_test
@@ -188,8 +188,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Find BTC 15m market with liquidity
-    std::cout << "\n[2] Finding BTC 15m market with liquidity...\n";
+    // Find ETH 15m market with liquidity
+    std::cout << "\n[2] Finding ETH 15m market with liquidity...\n";
 
     MarketInfo market;
     uint64_t now_ts = static_cast<uint64_t>(std::time(nullptr));
@@ -215,7 +215,7 @@ int main(int argc, char *argv[])
 
     for (const auto &[target_ts, expiry_ts] : candidates)
     {
-        std::string slug = "btc-updown-15m-" + std::to_string(target_ts);
+        std::string slug = "eth-updown-15m-" + std::to_string(target_ts);
         uint64_t time_left = expiry_ts - now_ts;
 
         HttpClient gamma_http;
@@ -306,7 +306,7 @@ int main(int argc, char *argv[])
 
     if (market.token_yes.empty())
     {
-        std::cerr << "    Could not find active BTC 15m market with liquidity\n";
+        std::cerr << "    Could not find active ETH 15m market with liquidity\n";
         http_global_cleanup();
         return 1;
     }
@@ -429,7 +429,7 @@ int main(int argc, char *argv[])
                 if (exp_ts <= new_now_ts + 120)
                     continue; // Need at least 2 min
 
-                std::string slug = "btc-updown-15m-" + std::to_string(start_ts);
+                std::string slug = "eth-updown-15m-" + std::to_string(start_ts);
 
                 HttpClient gamma_http;
                 gamma_http.set_base_url("https://gamma-api.polymarket.com");
