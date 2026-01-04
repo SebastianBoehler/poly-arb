@@ -107,13 +107,21 @@ const spotLagMinPctChange = 0.3; // minimum spot move % to track
 // Latest Polymarket prices per symbol for correlation
 const latestPolyPrices: Map<string, { yes: number; no: number; ts: number }> = new Map();
 
+// Counter for Bybit events received
+let bybitMomentumEventsReceived = 0;
+
 // Handle spot momentum event from Bybit - record pending move to track lag
 function handleSpotMomentum(event: SpotMomentumEvent) {
+  bybitMomentumEventsReceived++;
   // Extract symbol (BTCUSDT -> BTC, ETHUSDT -> ETH)
   const symbol = event.symbol.replace("USDT", "");
   const now = Date.now();
 
-  // Only track significant moves
+  console.log(
+    `[SpotLag] Bybit momentum #${bybitMomentumEventsReceived}: ${symbol} ${event.direction} ${event.pctChange.toFixed(3)}% in ${(event.durationMs / 1000).toFixed(1)}s`
+  );
+
+  // Only track significant moves (filter already done in bybit-ws, but double-check)
   if (Math.abs(event.pctChange) < spotLagMinPctChange) return;
 
   // Get current Polymarket price for this symbol
@@ -735,6 +743,15 @@ function printSummary(
   // Print pending spot moves being tracked
   if (pendingSpotMoves.length > 0) {
     console.log(`  Pending spot moves: ${pendingSpotMoves.length} (waiting for Polymarket to catch up)`);
+  }
+
+  // Print Bybit status
+  console.log(`\nBybit spot monitoring: ${bybitMomentumEventsReceived} momentum events received`);
+  if (latestPolyPrices.size > 0) {
+    const polyPriceStr = Array.from(latestPolyPrices.entries())
+      .map(([s, p]) => `${s}:YES=${p.yes.toFixed(3)}`)
+      .join(", ");
+    console.log(`  Polymarket prices tracked: ${polyPriceStr}`);
   }
 
   const lowestCombos = trackers

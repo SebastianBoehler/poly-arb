@@ -113,5 +113,9 @@ target_link_libraries(position_smoke PRIVATE polymarket::client)
 add_executable(order_benchmark src/order_benchmark.cpp)
 target_link_libraries(order_benchmark PRIVATE polymarket::client)
 
+# Average-in strategy test executable
+add_executable(avg_in_test src/avg_in_test.cpp)
+target_link_libraries(avg_in_test PRIVATE polymarket::client)
+
 # Install
 install(TARGETS polymarket_arb DESTINATION bin)

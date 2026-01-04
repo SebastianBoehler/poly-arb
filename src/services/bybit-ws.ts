@@ -52,8 +52,9 @@ export class BybitSpotClient {
   private readonly historyMaxSize = 500;
 
   // Momentum detection thresholds
-  private readonly momentumThresholdPct = 0.3; // 0.3% move triggers momentum event
-  private readonly momentumWindowMs = 30_000; // detect moves within 30s
+  private readonly momentumThresholdPct = 0.15; // 0.15% move triggers momentum event (lowered for more signals)
+  private readonly momentumWindowMs = 60_000; // detect moves within 60s
+  private lastLogTs = 0; // for periodic status logging
 
   // Callbacks
   private onPriceUpdate: SpotPriceCallback | null = null;
@@ -106,7 +107,7 @@ export class BybitSpotClient {
     this.ws = new WebSocket(url);
 
     this.ws.on("open", () => {
-      console.log(`[Bybit] WebSocket connected`);
+      console.log(`[Bybit] WebSocket connected to ${url}`);
       this.connected = true;
       this.reconnectAttempts = 0;
 
@@ -116,7 +117,8 @@ export class BybitSpotClient {
         args: this.symbols.map((s) => `tickers.${s}`),
       };
       this.ws?.send(JSON.stringify(subscribeMsg));
-      console.log(`[Bybit] Subscribed to: ${this.symbols.join(", ")}`);
+      console.log(`[Bybit] Subscribed to tickers: ${this.symbols.join(", ")}`);
+      console.log(`[Bybit] Momentum detection: ${this.momentumThresholdPct}% move in ${this.momentumWindowMs / 1000}s`);
 
       // Start ping interval (Bybit requires ping every 20s)
       this.pingInterval = setInterval(() => {
@@ -179,6 +181,15 @@ export class BybitSpotClient {
     };
 
     if (!Number.isFinite(update.lastPrice) || update.lastPrice <= 0) return;
+
+    // Log periodic status (every 60s)
+    if (now - this.lastLogTs > 60_000) {
+      const prices = Array.from(this.latestPrices.entries())
+        .map(([s, p]) => `${s.replace("USDT", "")}=$${p.lastPrice.toFixed(2)}`)
+        .join(", ");
+      console.log(`[Bybit] Status: ${prices}`);
+      this.lastLogTs = now;
+    }
 
     // Store latest price
     this.latestPrices.set(symbol, update);

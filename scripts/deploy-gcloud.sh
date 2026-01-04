@@ -137,10 +137,10 @@ deploy_gce() {
             --container-env="PRIVATE_KEY=${PRIVATE_KEY}" \
             --container-env="FUNDER_ADDRESS=${FUNDER_ADDRESS}" \
             --container-env="SIGNATURE_TYPE=${SIGNATURE_TYPE:-2}" \
-            --container-env="SIZE_USDC=${SIZE_USDC:-5}" \
-            --container-env="TRIGGER_COMBINED=${TRIGGER_COMBINED:-0.98}" \
-            --container-env="MAX_COMBINED=${MAX_COMBINED:-0.99}" \
-            --container-env="DRY_RUN=${DRY_RUN:-true}" \
+            --container-env="SIZE_USDC=${SIZE_USDC:-2}" \
+            --container-env="TRIGGER_COMBINED=${TRIGGER_COMBINED:-0.995}" \
+            --container-env="MAX_COMBINED=${MAX_COMBINED:-1.00}" \
+            --container-env="DRY_RUN=${DRY_RUN:-false}" \
             --container-env="HTTP_PROXY=${HTTP_PROXY:-}" \
             --container-restart-policy=always \
             --tags=poly-arb \

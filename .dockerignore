@@ -42,6 +42,7 @@ tests/
 
 # Scripts (analysis, not needed for runtime)
 scripts/
+!scripts/entrypoint.sh
 
 # GitHub workflows
 .github/

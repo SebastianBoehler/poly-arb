@@ -1,0 +1,110 @@
+# syntax=docker/dockerfile:1
+
+# Combined Docker image for C++ Arbitrage Bot + TS Redemption Service
+# Optimized for low-latency trading on GCloud with LTO
+
+# =============================================================================
+# Stage 1: Build C++ arb bot
+# =============================================================================
+FROM debian:bookworm-slim AS cpp-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    ca-certificates \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    zlib1g-dev \
+    lld \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY cpp/ ./cpp/
+
+WORKDIR /app/cpp
+
+# Build with LTO enabled for 5-15% performance improvement
+RUN mkdir -p build && cd build \
+    && cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DENABLE_LTO=ON \
+    && make -j$(nproc) arb_test
+
+# =============================================================================
+# Stage 2: Build TS redemption service
+# =============================================================================
+FROM oven/bun:1 AS ts-builder
+
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+# Copy source
+COPY src/ ./src/
+COPY tsconfig.json ./
+
+# =============================================================================
+# Stage 3: Minimal combined runtime
+# =============================================================================
+FROM debian:bookworm-slim AS runner
+
+# Install runtime dependencies for both C++ and TS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcurl4 \
+    libssl3 \
+    ca-certificates \
+    curl \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Bun runtime (install as root, then make available to appuser)
+RUN curl -fsSL https://bun.sh/install | bash \
+    && mv /root/.bun /opt/bun \
+    && chmod -R 755 /opt/bun
+ENV PATH="/opt/bun/bin:${PATH}"
+
+# Create non-root user
+RUN useradd --system --uid 1001 --create-home appuser
+
+WORKDIR /app
+
+# Copy C++ binary
+COPY --from=cpp-builder /app/cpp/build/arb_test ./arb_test
+
+# Copy TS app
+COPY --from=ts-builder /app/node_modules ./ts/node_modules
+COPY --from=ts-builder /app/src ./ts/src
+COPY --from=ts-builder /app/package.json ./ts/package.json
+COPY --from=ts-builder /app/tsconfig.json ./ts/tsconfig.json
+
+# Copy entrypoint script (from build context root)
+COPY --chmod=755 scripts/entrypoint.sh ./entrypoint.sh
+
+# Set ownership
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+# Environment variables (override at runtime)
+# PRIVATE_KEY and FUNDER_ADDRESS must be passed at runtime
+ENV SIGNATURE_TYPE="2"
+ENV SIZE_USDC="2"
+ENV TRIGGER_COMBINED="0.995"
+ENV MAX_COMBINED="1.00"
+ENV DRY_RUN="false"
+ENV DAEMON="true"
+ENV POLL_INTERVAL_MS="30000"
+
+# Health check - verify both processes are running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD pgrep arb_test && pgrep bun || exit 1
+
+# Run combined entrypoint
+CMD ["./entrypoint.sh"]
