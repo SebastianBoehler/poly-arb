@@ -75,6 +75,46 @@ export type TimeToExpiryHits = Record<number, Record<string, number>>; // thresh
 // Tracks liquidity (USD available) at each threshold
 export type ThresholdLiquidity = Record<number, { sumUsd: number; count: number; maxUsd: number }>;
 
+// Tracks how often a single-leg ask breaches high price near expiry, bucketed by time-to-expiry
+export type HighPriceExpiryHits = Record<number, Record<string, number>>; // threshold -> bucket -> count
+
+// Momentum tracking: detect rapid price moves (spot-lag exploitation)
+export interface MomentumEvent {
+  side: "yes" | "no";
+  startPrice: number;
+  endPrice: number;
+  startTs: number;
+  endTs: number;
+  durationMs: number;
+  priceChange: number;
+  secondsToExpiry: number;
+}
+
+// Tracks momentum moves by price change bucket
+export type MomentumStats = {
+  // How often price moves from <threshold to >target within window
+  moves: MomentumEvent[];
+  // Aggregates
+  count: number;
+  avgDurationMs: number;
+  avgPriceChange: number;
+  maxPriceChange: number;
+};
+
+// Spot-lag correlation: tracks when external spot price moves before Polymarket adjusts
+export interface SpotLagEvent {
+  symbol: string; // e.g., "BTC", "ETH"
+  spotDirection: "up" | "down";
+  spotPctChange: number; // % change in spot price
+  spotMoveStartTs: number;
+  polymarketAdjustTs: number; // when Polymarket odds caught up
+  lagMs: number; // delay between spot move and Polymarket adjustment
+  polymarketStartPrice: number; // YES leg price before adjustment
+  polymarketEndPrice: number; // YES leg price after adjustment
+  polymarketPriceChange: number; // change in Polymarket odds
+  profitable: boolean; // would entering on spot signal have been profitable?
+}
+
 // Tracks opportunity duration (how long combined price stays below threshold)
 export type ThresholdDuration = Record<
   number,
@@ -113,4 +153,10 @@ export interface StatsMarketTracker {
   asksNo: OrderbookLevel[];
   // Track active opportunities per threshold (for duration measurement)
   activeOpportunities: Map<number, number>; // threshold -> startedAt timestamp
+  durations: ThresholdDuration; // per-market duration stats
+  // Momentum tracking per leg
+  momentumYes?: { startPrice: number; startTs: number } | null;
+  momentumNo?: { startPrice: number; startTs: number } | null;
+  priceHistoryYes: { price: number; ts: number }[];
+  priceHistoryNo: { price: number; ts: number }[];
 }

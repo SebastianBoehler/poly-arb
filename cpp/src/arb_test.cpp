@@ -813,26 +813,31 @@ int main(int argc, char *argv[])
                 double entry_price = yes_filled ? yes_price : no_price;
                 std::string side_name = yes_filled ? "YES" : "NO";
 
-                // Use exact shares from API response - don't round, the to_wei function handles precision
-                double sell_shares = filled_shares;
+                // Round shares DOWN to 2 decimals - API requires max 2 decimal precision for SELL maker amount
+                // This leaves tiny dust (max 0.0099 shares) but allows the order to go through
+                double sell_shares = std::floor(filled_shares * 100) / 100.0;
+                std::cout << "    Filled: " << filled_shares << " shares, selling: " << sell_shares << " (dust: " << (filled_shares - sell_shares) << ")\n";
 
                 if (sell_shares > 0)
                 {
                     // Wait for trade to settle before selling
-                    std::cout << "\n    Waiting 2s for trade settlement...\n";
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    std::cout << "\n    Waiting 5s for trade settlement...\n";
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
 
+                    // For FAK SELL, use a low price (0.01) to ensure it fills at best bid
+                    // This is a market sell - we accept whatever the market offers
+                    double sell_price = 0.01;
                     std::cout << "\n[8] Creating SELL order to close " << side_name << " position...\n";
-                    std::cout << "    Selling " << sell_shares << " shares @ " << entry_price << "\n";
+                    std::cout << "    Selling " << sell_shares << " shares @ market (min " << sell_price << ")\n";
 
-                    // Create sell order at entry price
+                    // Create sell order at minimum price to ensure fill
                     OrderData sell_order;
                     sell_order.maker = funder_address;
                     sell_order.taker = "0x0000000000000000000000000000000000000000";
                     sell_order.token_id = filled_token;
                     // For SELL: maker_amount = shares (2 decimals), taker_amount = USDC (4 decimals)
                     sell_order.maker_amount = to_wei(sell_shares, 6);
-                    double usdc_expected = sell_shares * entry_price;
+                    double usdc_expected = sell_shares * sell_price;
                     sell_order.taker_amount = to_wei(usdc_expected, 6);
                     sell_order.side = OrderSide::SELL;
                     sell_order.fee_rate_bps = "0";
@@ -864,7 +869,7 @@ int main(int argc, char *argv[])
                     sell_payload["deferExec"] = false;
                     sell_payload["order"] = sell_order_obj;
                     sell_payload["owner"] = creds.api_key;
-                    sell_payload["orderType"] = "GTC"; // Good-Til-Cancelled to ensure it fills
+                    sell_payload["orderType"] = "FAK"; // Fill-And-Kill (market order) - no minimum size
 
                     std::string sell_body = sell_payload.dump();
                     auto sell_l2 = signer.generate_l2_headers(creds, "POST", "/order", sell_body, funder_address);

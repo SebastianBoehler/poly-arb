@@ -14,9 +14,57 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Options for advanced optimizations
+option(ENABLE_LTO "Enable Link-Time Optimization (Release only)" ON)
+option(ENABLE_PGO_GENERATE "Build with PGO instrumentation (profile generation)" OFF)
+option(ENABLE_PGO_USE "Build using PGO profile data" OFF)
+option(ENABLE_ASAN "Enable AddressSanitizer (Debug/RelWithDebInfo)" OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (Debug/RelWithDebInfo)" OFF)
+
 # Compiler flags for performance
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -march=native -DNDEBUG -fno-omit-frame-pointer")
+
+# Link-Time Optimization (LTO) for Release builds
+if(ENABLE_LTO AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
+    if(lto_supported)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+        message(STATUS "LTO enabled for Release build")
+    else()
+        message(WARNING "LTO not supported: ${lto_error}")
+    endif()
+endif()
+
+# Profile-Guided Optimization (PGO)
+if(ENABLE_PGO_GENERATE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-data")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-data")
+    message(STATUS "PGO: Instrumentation enabled. Run workload, then rebuild with -DENABLE_PGO_USE=ON")
+elseif(ENABLE_PGO_USE)
+    if(EXISTS "${CMAKE_BINARY_DIR}/pgo-data")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use=${CMAKE_BINARY_DIR}/pgo-data -fprofile-correction")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${CMAKE_BINARY_DIR}/pgo-data")
+        message(STATUS "PGO: Using profile data from ${CMAKE_BINARY_DIR}/pgo-data")
+    else()
+        message(WARNING "PGO: Profile data not found at ${CMAKE_BINARY_DIR}/pgo-data. Run instrumented build first.")
+    endif()
+endif()
+
+# Sanitizers for debugging (not for Release)
+if(ENABLE_ASAN AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+    message(STATUS "AddressSanitizer enabled")
+endif()
+
+if(ENABLE_UBSAN AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
+    message(STATUS "UndefinedBehaviorSanitizer enabled")
+endif()
 
 # Fetch dependencies
 include(FetchContent)

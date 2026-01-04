@@ -14,6 +14,7 @@
 import { RealTimeDataClient, ConnectionStatus } from "@polymarket/real-time-data-client";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { fetchCrypto15mMarkets, fetchCrypto1hMarkets, fetchCrypto4hMarkets } from "../core/gamma";
+import { BybitSpotClient, type SpotMomentumEvent, type SpotPriceUpdate } from "../services/bybit-ws";
 import type {
   MarketState,
   StatsMarketTracker,
@@ -23,8 +24,9 @@ import type {
   ThresholdLiquidity,
   ThresholdDuration,
   OrderbookLevel,
+  HighPriceExpiryHits,
 } from "../core/types";
-import { bumpThresholdHits, bumpThresholdPriceSums, getExpiryBucket, bumpTimeToExpiryHits } from "./utils";
+import { bumpThresholdHits, bumpThresholdPriceSums, getExpiryBucket, bumpTimeToExpiryHits, bumpHighPriceExpiryHits, FINE_EXPIRY_BUCKETS } from "./utils";
 import { getMarketExpiry, formatExpiry, extractSymbol } from "../core/utils";
 
 const durationSampleCap = 1000; // keep last N durations per threshold for rolling stats
@@ -43,12 +45,210 @@ let overallPriceSums: ThresholdPriceSums = {};
 let overallExpiryHits: TimeToExpiryHits = {};
 let overallLiquidity: ThresholdLiquidity = {};
 let overallDuration: ThresholdDuration = {};
-
-function ensureDuration(th: number): Required<ThresholdDuration>[number] {
+let highPriceExpiryYes: HighPriceExpiryHits = {};
+let highPriceExpiryNo: HighPriceExpiryHits = {};
+// Per-market duration stats
+function ensureOverallDuration(th: number): Required<ThresholdDuration>[number] {
   if (!overallDuration[th]) {
     overallDuration[th] = { sumMs: 0, count: 0, maxMs: 0, minMs: Number.POSITIVE_INFINITY, samples: [] };
   }
   return overallDuration[th] as Required<ThresholdDuration>[number];
+}
+function ensureMarketDuration(tracker: StatsMarketTracker, th: number): Required<ThresholdDuration>[number] {
+  if (!tracker.durations[th]) {
+    tracker.durations[th] = { sumMs: 0, count: 0, maxMs: 0, minMs: Number.POSITIVE_INFINITY, samples: [] };
+  }
+  return tracker.durations[th] as Required<ThresholdDuration>[number];
+}
+
+// Momentum tracking: detect rapid price moves (spot-lag exploitation)
+const momentumWindowMs = 90_000; // 90s window to detect momentum
+const momentumPriceHistoryCap = 100; // keep last N price points per leg
+const momentumStartThreshold = 0.5; // price must start below this
+const momentumEndThresholds = [0.8, 0.9, 0.95]; // target thresholds to track
+interface MomentumMove {
+  side: "yes" | "no";
+  startPrice: number;
+  endPrice: number;
+  durationMs: number;
+  secondsToExpiry: number;
+  targetThreshold: number;
+}
+let momentumMoves: MomentumMove[] = [];
+
+// Spot-lag tracking: correlate Bybit spot moves with Polymarket adjustments
+interface SpotLagEvent {
+  symbol: string;
+  spotDirection: "up" | "down";
+  spotPctChange: number;
+  spotMoveTs: number;
+  polyAdjustTs: number;
+  lagMs: number;
+  polyStartPrice: number;
+  polyEndPrice: number;
+  polyPriceChange: number;
+  profitable: boolean;
+}
+let spotLagEvents: SpotLagEvent[] = [];
+
+// Track pending spot momentum events waiting for Polymarket to catch up
+interface PendingSpotMove {
+  symbol: string;
+  direction: "up" | "down";
+  spotPctChange: number;
+  spotMoveTs: number;
+  polyPriceAtSpotMove: number; // Polymarket YES price when spot moved
+  expiresAt: number; // stop tracking after this time
+}
+let pendingSpotMoves: PendingSpotMove[] = [];
+const spotLagWindowMs = 120_000; // track for up to 2 minutes after spot move
+const spotLagMinPctChange = 0.3; // minimum spot move % to track
+
+// Latest Polymarket prices per symbol for correlation
+const latestPolyPrices: Map<string, { yes: number; no: number; ts: number }> = new Map();
+
+// Handle spot momentum event from Bybit - record pending move to track lag
+function handleSpotMomentum(event: SpotMomentumEvent) {
+  // Extract symbol (BTCUSDT -> BTC, ETHUSDT -> ETH)
+  const symbol = event.symbol.replace("USDT", "");
+  const now = Date.now();
+
+  // Only track significant moves
+  if (Math.abs(event.pctChange) < spotLagMinPctChange) return;
+
+  // Get current Polymarket price for this symbol
+  const polyPrice = latestPolyPrices.get(symbol);
+  if (!polyPrice) return;
+
+  // Add to pending moves
+  pendingSpotMoves.push({
+    symbol,
+    direction: event.direction,
+    spotPctChange: event.pctChange,
+    spotMoveTs: event.timestamp,
+    polyPriceAtSpotMove: polyPrice.yes,
+    expiresAt: now + spotLagWindowMs,
+  });
+
+  // Cap pending moves
+  if (pendingSpotMoves.length > 100) {
+    pendingSpotMoves.shift();
+  }
+
+  console.log(
+    `[SpotLag] ${symbol} spot ${event.direction} ${event.pctChange.toFixed(2)}% - tracking for Polymarket adjustment (current YES: ${polyPrice.yes.toFixed(3)})`
+  );
+}
+
+// Check if Polymarket has caught up to a pending spot move
+function checkSpotLagCorrelation(symbol: string, newYesPrice: number, now: number) {
+  // Find pending moves for this symbol
+  const pendingIdx = pendingSpotMoves.findIndex((p) => p.symbol === symbol && p.expiresAt > now);
+  if (pendingIdx === -1) return;
+
+  const pending = pendingSpotMoves[pendingIdx];
+  const priceChange = newYesPrice - pending.polyPriceAtSpotMove;
+  const priceChangePct = (priceChange / pending.polyPriceAtSpotMove) * 100;
+
+  // Check if Polymarket moved in the expected direction
+  const expectedDirection = pending.direction === "up" ? 1 : -1;
+  const actualDirection = priceChange > 0 ? 1 : -1;
+  const movedEnough = Math.abs(priceChangePct) >= 5; // 5% odds change threshold
+
+  if (movedEnough) {
+    const lagMs = now - pending.spotMoveTs;
+    const profitable = expectedDirection === actualDirection;
+
+    const event: SpotLagEvent = {
+      symbol,
+      spotDirection: pending.direction,
+      spotPctChange: pending.spotPctChange,
+      spotMoveTs: pending.spotMoveTs,
+      polyAdjustTs: now,
+      lagMs,
+      polyStartPrice: pending.polyPriceAtSpotMove,
+      polyEndPrice: newYesPrice,
+      polyPriceChange: priceChangePct,
+      profitable,
+    };
+
+    spotLagEvents.push(event);
+    if (spotLagEvents.length > 500) {
+      spotLagEvents.shift();
+    }
+
+    console.log(
+      `[SpotLag] ${symbol} Polymarket caught up! Lag: ${(lagMs / 1000).toFixed(1)}s, ` +
+        `Poly: ${pending.polyPriceAtSpotMove.toFixed(3)} → ${newYesPrice.toFixed(3)} (${priceChangePct > 0 ? "+" : ""}${priceChangePct.toFixed(1)}%), ` +
+        `Profitable: ${profitable ? "YES" : "NO"}`
+    );
+
+    // Remove this pending move
+    pendingSpotMoves.splice(pendingIdx, 1);
+  }
+}
+
+// Clean up expired pending moves
+function cleanupExpiredPendingMoves(now: number) {
+  pendingSpotMoves = pendingSpotMoves.filter((p) => p.expiresAt > now);
+}
+
+// Track momentum: detect when price moves from <startThreshold to >endThreshold within window
+function trackMomentum(entry: { market: StatsMarketTracker; side: "yes" | "no" }, bestAsk: number, now: number) {
+  const history = entry.side === "yes" ? entry.market.priceHistoryYes : entry.market.priceHistoryNo;
+
+  // Add current price to history
+  history.push({ price: bestAsk, ts: now });
+
+  // Trim old entries outside window
+  while (history.length > 0 && now - history[0].ts > momentumWindowMs) {
+    history.shift();
+  }
+
+  // Cap history size
+  while (history.length > momentumPriceHistoryCap) {
+    history.shift();
+  }
+
+  if (history.length < 2) return;
+
+  // Look for momentum: find earliest point where price was <0.5, check if current >target
+  const earliestLow = history.find((h) => h.price < momentumStartThreshold);
+  if (!earliestLow) return;
+
+  // Check each target threshold
+  for (const target of momentumEndThresholds) {
+    if (bestAsk >= target && earliestLow.price < momentumStartThreshold) {
+      const durationMs = now - earliestLow.ts;
+      const secondsToExpiry = Math.max(0, (entry.market.expiresAt - now) / 1000);
+
+      // Only record if this is a new crossing (avoid duplicates)
+      // Check if we already recorded a similar move recently
+      const recentSimilar = momentumMoves.find(
+        (m) =>
+          m.side === entry.side &&
+          m.targetThreshold === target &&
+          Math.abs(m.durationMs - durationMs) < 5000 &&
+          Math.abs(m.secondsToExpiry - secondsToExpiry) < 60
+      );
+
+      if (!recentSimilar) {
+        momentumMoves.push({
+          side: entry.side,
+          startPrice: earliestLow.price,
+          endPrice: bestAsk,
+          durationMs,
+          secondsToExpiry,
+          targetThreshold: target,
+        });
+
+        // Cap total moves stored
+        if (momentumMoves.length > 1000) {
+          momentumMoves.shift();
+        }
+      }
+    }
+  }
 }
 
 function median(values: number[]): number {
@@ -82,6 +282,11 @@ const refreshMinutesRaw = process.env.STATS_REFRESH_MINUTES;
 const refreshMinutes = Number.isFinite(Number(refreshMinutesRaw)) && Number(refreshMinutesRaw) > 0 ? Number(refreshMinutesRaw) : 5;
 const outCsvPath = process.env.STATS_OUT_CSV || "stats-summary.csv";
 const timeframes = (process.env.STATS_TIMEFRAMES || "15m").split(",").map((t) => t.trim());
+const highPriceThresholds = (process.env.STATS_HIGH_PRICE_THRESHOLDS || "0.95,0.97,0.99")
+  .split(",")
+  .map((t) => Number(t.trim()))
+  .filter((t) => !Number.isNaN(t))
+  .sort((a, b) => a - b);
 
 async function main() {
   // Fetch markets based on configured timeframes
@@ -121,6 +326,11 @@ async function main() {
       asksYes: [],
       asksNo: [],
       activeOpportunities: new Map(),
+      momentumYes: null,
+      momentumNo: null,
+      priceHistoryYes: [],
+      priceHistoryNo: [],
+      durations: {},
     };
     tokenToMarket.set(m.tokenYes, { market: tracker, side: "yes" });
     tokenToMarket.set(m.tokenNo, { market: tracker, side: "no" });
@@ -137,7 +347,27 @@ async function main() {
   console.log(`Earliest market expires at: ${formatExpiry(earliestExpiry)} UTC`);
   console.log(`Thresholds: ${thresholds.join(", ")}`);
   console.log(`Summary interval: ${logSeconds}s\n`);
-  console.log("Connecting to WebSocket...\n");
+
+  // Initialize Bybit WebSocket for spot price monitoring
+  const bybitSymbols = ["BTCUSDT", "ETHUSDT"];
+  const bybitClient = new BybitSpotClient(bybitSymbols);
+
+  bybitClient.setOnMomentum((event) => {
+    handleSpotMomentum(event);
+  });
+
+  bybitClient.setOnConnect(() => {
+    console.log(`[Bybit] Connected and monitoring: ${bybitSymbols.join(", ")}`);
+  });
+
+  bybitClient.setOnDisconnect(() => {
+    console.log(`[Bybit] Disconnected`);
+  });
+
+  console.log("Connecting to Bybit WebSocket for spot prices...");
+  bybitClient.connect();
+
+  console.log("Connecting to Polymarket WebSocket...\n");
 
   ensureCsvHeader(outCsvPath, thresholds);
 
@@ -181,6 +411,29 @@ async function main() {
 
         const bestAsk = Math.min(...parsedAsks.map((a) => a.price));
         if (!Number.isFinite(bestAsk) || bestAsk <= 0) return;
+
+        // Update latest Polymarket prices for spot-lag correlation
+        const symbol = extractSymbol(entry.market.market.slug);
+        const now = Date.now();
+        const existing = latestPolyPrices.get(symbol) || { yes: 0, no: 0, ts: 0 };
+        if (entry.side === "yes") {
+          existing.yes = bestAsk;
+        } else {
+          existing.no = bestAsk;
+        }
+        existing.ts = now;
+        latestPolyPrices.set(symbol, existing);
+
+        // Check for spot-lag correlation (did Polymarket catch up to a pending spot move?)
+        if (entry.side === "yes") {
+          checkSpotLagCorrelation(symbol, bestAsk, now);
+        }
+
+        // Clean up expired pending moves periodically
+        if (totalBookEvents % 100 === 0) {
+          cleanupExpiredPendingMoves(now);
+        }
+
         applyBestAskWithLiquidity(entry, bestAsk);
       }
     },
@@ -312,6 +565,11 @@ async function main() {
             asksYes: [],
             asksNo: [],
             activeOpportunities: new Map(),
+            momentumYes: null,
+            momentumNo: null,
+            priceHistoryYes: [],
+            priceHistoryNo: [],
+            durations: {},
           };
           marketTrackers.set(m.slug, tracker);
           if (!allTokenIds.has(m.tokenYes)) {
@@ -356,6 +614,7 @@ async function main() {
     clearInterval(logInterval);
     if (refreshInterval) clearInterval(refreshInterval);
     client.disconnect();
+    bybitClient.disconnect();
     printSummary(tokenToMarket, overallHits, totalCombinedSamples, true, outCsvPath);
     process.exit(0);
   });
@@ -442,6 +701,42 @@ function printSummary(
     console.log(`  <=${th}: avg=${avgMs.toFixed(0)}ms, min=${minMs.toFixed(0)}ms, max=${dur.maxMs.toFixed(0)}ms, count=${dur.count}`);
   }
 
+  // Print momentum (spot-lag) stats
+  if (momentumMoves.length > 0) {
+    console.log("\nMomentum moves (spot-lag detection: <0.5 → >target within 90s):");
+    for (const target of momentumEndThresholds) {
+      const moves = momentumMoves.filter((m) => m.targetThreshold === target);
+      if (moves.length === 0) continue;
+      const avgDur = moves.reduce((a, m) => a + m.durationMs, 0) / moves.length;
+      const avgExpiry = moves.reduce((a, m) => a + m.secondsToExpiry, 0) / moves.length;
+      console.log(`  →${target}: ${moves.length} moves, avg duration=${(avgDur / 1000).toFixed(1)}s, avg expiry=${avgExpiry.toFixed(0)}s`);
+    }
+  }
+
+  // Print spot-lag correlation stats (Bybit → Polymarket)
+  if (spotLagEvents.length > 0) {
+    console.log("\nSpot-Lag Correlation (Bybit spot → Polymarket odds):");
+    const bySymbol = new Map<string, SpotLagEvent[]>();
+    for (const e of spotLagEvents) {
+      const arr = bySymbol.get(e.symbol) || [];
+      arr.push(e);
+      bySymbol.set(e.symbol, arr);
+    }
+    for (const [sym, events] of bySymbol) {
+      const avgLag = events.reduce((a, e) => a + e.lagMs, 0) / events.length;
+      const profitableCount = events.filter((e) => e.profitable).length;
+      const profitRate = (profitableCount / events.length) * 100;
+      console.log(
+        `  ${sym}: ${events.length} events, avg lag=${(avgLag / 1000).toFixed(1)}s, profitable=${profitableCount}/${events.length} (${profitRate.toFixed(0)}%)`
+      );
+    }
+  }
+
+  // Print pending spot moves being tracked
+  if (pendingSpotMoves.length > 0) {
+    console.log(`  Pending spot moves: ${pendingSpotMoves.length} (waiting for Polymarket to catch up)`);
+  }
+
   const lowestCombos = trackers
     .filter((t) => Number.isFinite(t.lastCombined))
     .sort((a, b) => a.lastCombined - b.lastCombined)
@@ -460,6 +755,10 @@ function printSummary(
   if (csvPath) {
     const symbolStats = aggregateSymbolStats(trackers);
     writeCsvSummary(csvPath, totalCombinedSamples, overallHits, overallPriceSums, symbolStats);
+    writeHighPriceCsv(csvPath.replace(".csv", "-nearprice.csv"), new Date().toISOString());
+    writeMomentumCsv(csvPath.replace(".csv", "-momentum.csv"), new Date().toISOString());
+    writeDurationPerSymbolCsv(csvPath.replace(".csv", "-duration-symbol.csv"), new Date().toISOString(), trackers);
+    writeSpotLagCsv(csvPath.replace(".csv", "-spotlag.csv"), new Date().toISOString());
   }
 
   lastPrintSamples = totalCombinedSamples;
@@ -552,6 +851,12 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
     bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, entry.market.priceSums);
     bumpThresholdPriceSums(combined, bestAskYes, bestAskNo, thresholds, overallPriceSums);
     bumpTimeToExpiryHits(combined, entry.market.expiresAt, thresholds, overallExpiryHits);
+    // Track near-expiry high pricing per leg
+    bumpHighPriceExpiryHits(bestAskYes, entry.market.expiresAt, highPriceThresholds, highPriceExpiryYes);
+    bumpHighPriceExpiryHits(bestAskNo, entry.market.expiresAt, highPriceThresholds, highPriceExpiryNo);
+
+    // Track momentum (spot-lag): detect rapid price moves from <0.5 to >0.8/0.9/0.95
+    trackMomentum(entry, bestAsk, now);
 
     // Track opportunity duration per threshold
     for (const th of thresholds) {
@@ -568,7 +873,8 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
         const durationMs = Math.min(rawDuration, durationHardCapMs);
         entry.market.activeOpportunities.delete(th);
 
-        const dur = ensureDuration(th);
+        // Update overall duration stats
+        const dur = ensureOverallDuration(th);
         dur.sumMs += durationMs;
         dur.count += 1;
         dur.maxMs = Math.max(dur.maxMs, durationMs);
@@ -576,6 +882,17 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
         dur.samples.push(durationMs);
         if (dur.samples.length > durationSampleCap) {
           dur.samples.shift();
+        }
+
+        // Update per-market duration stats
+        const mktDur = ensureMarketDuration(entry.market, th);
+        mktDur.sumMs += durationMs;
+        mktDur.count += 1;
+        mktDur.maxMs = Math.max(mktDur.maxMs, durationMs);
+        mktDur.minMs = Math.min(mktDur.minMs, durationMs);
+        mktDur.samples.push(durationMs);
+        if (mktDur.samples.length > durationSampleCap) {
+          mktDur.samples.shift();
         }
       }
       // If still active (isOpportunity && wasActive), keep tracking
@@ -667,6 +984,37 @@ function writeCsvSummary(
   writeDurationCsv(path.replace(".csv", "-duration.csv"), ts);
 }
 
+function writeHighPriceCsv(path: string, ts: string) {
+  const header =
+    ["timestamp", "side", "threshold", ...FINE_EXPIRY_BUCKETS.map((b) => `hits_${b}`), ...FINE_EXPIRY_BUCKETS.map((b) => `pct_${b}`)].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  const sides: ["yes" | "no", HighPriceExpiryHits][] = [
+    ["yes", highPriceExpiryYes],
+    ["no", highPriceExpiryNo],
+  ];
+
+  let buf = "";
+  for (const [side, hits] of sides) {
+    for (const th of highPriceThresholds) {
+      const buckets = hits[th];
+      if (!buckets) continue;
+      const total = Object.values(buckets).reduce((a, b) => a + b, 0);
+      if (total === 0) continue;
+      const hitValues = FINE_EXPIRY_BUCKETS.map((b) => (buckets[b] || 0).toString());
+      const pctValues = FINE_EXPIRY_BUCKETS.map((b) => {
+        const count = buckets[b] || 0;
+        return total > 0 ? ((count / total) * 100).toFixed(2) : "0";
+      });
+      buf += [ts, side, th.toString(), ...hitValues, ...pctValues].join(",") + "\n";
+    }
+  }
+
+  appendFileSync(path, buf, { encoding: "utf8" });
+}
+
 function writeTimeBucketCsv(path: string, ts: string) {
   const buckets = ["0-5", "5-10", "10-15", "15-30", "30-60", "60+"];
 
@@ -729,6 +1077,100 @@ function writeDurationCsv(path: string, ts: string) {
     buf += [ts, th.toString(), avgMs, p90Ms, medMs, rollingP90, minMs, dur.maxMs.toFixed(0), dur.count.toString()].join(",") + "\n";
   }
   appendFileSync(path, buf, { encoding: "utf8" });
+}
+
+function writeDurationPerSymbolCsv(path: string, ts: string, trackers: StatsMarketTracker[]) {
+  // Per-symbol duration CSV: tracks how long opportunities last per market
+  const header = ["timestamp", "symbol", "timeframe", "threshold", "avg_ms", "p90_ms", "med_ms", "min_ms", "max_ms", "count"].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  let buf = "";
+  for (const tracker of trackers) {
+    const symbol = extractSymbol(tracker.market.slug);
+    for (const th of thresholds) {
+      const dur = tracker.durations[th];
+      if (!dur || dur.count === 0) continue;
+      const avgMs = (dur.sumMs / dur.count).toFixed(0);
+      const minMs = dur.minMs === Number.POSITIVE_INFINITY ? "0" : dur.minMs.toFixed(0);
+      const p90Ms = p90(dur.samples).toFixed(0);
+      const medMs = median(dur.samples).toFixed(0);
+      buf += [ts, symbol, tracker.timeframe, th.toString(), avgMs, p90Ms, medMs, minMs, dur.maxMs.toFixed(0), dur.count.toString()].join(",") + "\n";
+    }
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
+}
+
+function writeMomentumCsv(path: string, ts: string) {
+  // Momentum CSV: tracks rapid price moves (spot-lag exploitation)
+  const header =
+    ["timestamp", "target_threshold", "count", "avg_duration_s", "min_duration_s", "max_duration_s", "avg_expiry_s", "avg_start_price", "avg_end_price"].join(
+      ","
+    ) + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  let buf = "";
+  for (const target of momentumEndThresholds) {
+    const moves = momentumMoves.filter((m) => m.targetThreshold === target);
+    if (moves.length === 0) continue;
+
+    const avgDur = moves.reduce((a, m) => a + m.durationMs, 0) / moves.length / 1000;
+    const minDur = Math.min(...moves.map((m) => m.durationMs)) / 1000;
+    const maxDur = Math.max(...moves.map((m) => m.durationMs)) / 1000;
+    const avgExpiry = moves.reduce((a, m) => a + m.secondsToExpiry, 0) / moves.length;
+    const avgStart = moves.reduce((a, m) => a + m.startPrice, 0) / moves.length;
+    const avgEnd = moves.reduce((a, m) => a + m.endPrice, 0) / moves.length;
+
+    buf +=
+      [
+        ts,
+        target.toString(),
+        moves.length.toString(),
+        avgDur.toFixed(1),
+        minDur.toFixed(1),
+        maxDur.toFixed(1),
+        avgExpiry.toFixed(0),
+        avgStart.toFixed(3),
+        avgEnd.toFixed(3),
+      ].join(",") + "\n";
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
+}
+
+function writeSpotLagCsv(path: string, ts: string) {
+  // Spot-lag CSV: tracks correlation between Bybit spot moves and Polymarket adjustments
+  const header =
+    ["timestamp", "symbol", "spot_direction", "spot_pct_change", "lag_ms", "poly_start_price", "poly_end_price", "poly_pct_change", "profitable"].join(",") +
+    "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  if (spotLagEvents.length === 0) return;
+
+  // Write individual events
+  let buf = "";
+  for (const e of spotLagEvents) {
+    buf +=
+      [
+        ts,
+        e.symbol,
+        e.spotDirection,
+        e.spotPctChange.toFixed(3),
+        e.lagMs.toString(),
+        e.polyStartPrice.toFixed(4),
+        e.polyEndPrice.toFixed(4),
+        e.polyPriceChange.toFixed(2),
+        e.profitable ? "1" : "0",
+      ].join(",") + "\n";
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
+
+  // Clear events after writing to avoid duplicates
+  spotLagEvents = [];
 }
 
 main();

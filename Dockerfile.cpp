@@ -6,7 +6,7 @@
 # Stage 1: Build environment
 FROM debian:bookworm-slim AS builder
 
-# Install build dependencies
+# Install build dependencies (including lld for faster LTO linking)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libtool \
     pkg-config \
     zlib1g-dev \
+    lld \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,11 +29,12 @@ COPY cpp/ ./cpp/
 
 WORKDIR /app/cpp
 
-# Build with CMake
+# Build with CMake - Release with LTO enabled (default)
+# LTO provides 5-15% performance improvement via whole-program optimization
 RUN mkdir -p build && cd build \
     && cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
+    -DENABLE_LTO=ON \
     && make -j$(nproc) arb_test order_benchmark
 
 # Stage 2: Minimal runtime

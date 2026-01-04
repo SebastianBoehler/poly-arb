@@ -72,6 +72,13 @@ def load_duration(csv_path: Path) -> pd.DataFrame:
     return df
 
 
+def load_nearprice(csv_path: Path) -> pd.DataFrame:
+    """Load near-expiry high-price data."""
+    df = pd.read_csv(csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+
 def latest_symbol_snapshot(df: pd.DataFrame) -> pd.DataFrame:
     symbols = df[df["row_type"] == "symbol"].copy()
     if symbols.empty:
@@ -235,6 +242,242 @@ def print_duration_summary(df: pd.DataFrame) -> None:
             print(f"  • ≤{th}: Moderate ({avg_ms:.0f}ms avg) - standard execution OK")
         else:
             print(f"  • ≤{th}: Comfortable ({avg_ms:.0f}ms avg) - plenty of time to execute")
+
+
+def print_nearprice_summary(df: pd.DataFrame) -> None:
+    if df.empty:
+        print("\nNo near-expiry high-price data available.")
+        return
+
+    print("\n" + "=" * 60)
+    print("NEAR-EXPIRY HIGH-PRICE ANALYSIS (single leg)")
+    print("=" * 60)
+
+    latest = df.sort_values("timestamp").groupby(["side", "threshold"]).tail(1)
+
+    bucket_order = [
+        "pct_0-5s",
+        "pct_5-15s",
+        "pct_15-30s",
+        "pct_30-60s",
+        "pct_60-300s",
+        "pct_5-15m",
+        "pct_15-60m",
+        "pct_60+m",
+    ]
+
+    print(f"\n{'Side':<6} {'Thr':<6} " + " ".join([b.replace('pct_', '').ljust(9) for b in bucket_order]))
+    print("-" * 72)
+    for _, row in latest.sort_values(["side", "threshold"]).iterrows():
+        line = f"{row['side']:<6} {row['threshold']:<6} "
+        parts = []
+        for b in bucket_order:
+            pct = row.get(b, 0)
+            parts.append(f"{pct:>8.1f}%")
+        print(line + " ".join(parts))
+
+    print("\nInterpretation:")
+    print("  • High percentages in sub-60s buckets suggest 0.95+/0.99 pricing only shows up right before expiry.")
+    print("  • If mass is in minutes buckets, there may be safer early entries at high prices.")
+
+
+def load_duration_symbol(csv_path: Path) -> pd.DataFrame:
+    """Load per-symbol duration CSV data."""
+    df = pd.read_csv(csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+
+def load_momentum(csv_path: Path) -> pd.DataFrame:
+    """Load momentum/spot-lag data."""
+    df = pd.read_csv(csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+
+def load_spotlag(csv_path: Path) -> pd.DataFrame:
+    """Load spot-lag correlation data (Bybit → Polymarket)."""
+    df = pd.read_csv(csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+
+def print_spotlag_summary(df: pd.DataFrame) -> None:
+    """Print summary of spot-lag correlation (Bybit spot → Polymarket odds)."""
+    if df.empty:
+        print("\nNo spot-lag correlation data available.")
+        return
+
+    print("\n" + "=" * 60)
+    print("SPOT-LAG CORRELATION ANALYSIS (Bybit → Polymarket)")
+    print("=" * 60)
+    print("Tracks when Bybit spot price moves before Polymarket odds adjust")
+
+    # Group by symbol
+    for symbol in df["symbol"].unique():
+        sym_df = df[df["symbol"] == symbol]
+        total = len(sym_df)
+        profitable = sym_df["profitable"].sum()
+        profit_rate = (profitable / total) * 100 if total > 0 else 0
+        
+        avg_lag = sym_df["lag_ms"].mean() / 1000
+        min_lag = sym_df["lag_ms"].min() / 1000
+        max_lag = sym_df["lag_ms"].max() / 1000
+        
+        avg_spot_change = sym_df["spot_pct_change"].abs().mean()
+        avg_poly_change = sym_df["poly_pct_change"].abs().mean()
+        
+        print(f"\n{symbol}:")
+        print(f"  Events: {total}")
+        print(f"  Profitable: {profitable}/{total} ({profit_rate:.1f}%)")
+        print(f"  Lag: avg={avg_lag:.1f}s, min={min_lag:.1f}s, max={max_lag:.1f}s")
+        print(f"  Avg spot move: {avg_spot_change:.2f}%")
+        print(f"  Avg Polymarket adjustment: {avg_poly_change:.1f}%")
+        
+        # Direction breakdown
+        up_events = sym_df[sym_df["spot_direction"] == "up"]
+        down_events = sym_df[sym_df["spot_direction"] == "down"]
+        if len(up_events) > 0:
+            up_profit = up_events["profitable"].sum() / len(up_events) * 100
+            print(f"  UP moves: {len(up_events)} ({up_profit:.0f}% profitable)")
+        if len(down_events) > 0:
+            down_profit = down_events["profitable"].sum() / len(down_events) * 100
+            print(f"  DOWN moves: {len(down_events)} ({down_profit:.0f}% profitable)")
+
+    print("\nStrategy Insights:")
+    overall_profit_rate = df["profitable"].mean() * 100
+    avg_lag_all = df["lag_ms"].mean() / 1000
+    
+    if overall_profit_rate >= 60:
+        print(f"  ✓ Strong signal: {overall_profit_rate:.0f}% profitable with {avg_lag_all:.1f}s avg lag")
+        print("  ✓ Consider implementing spot-following strategy")
+    elif overall_profit_rate >= 50:
+        print(f"  ~ Moderate signal: {overall_profit_rate:.0f}% profitable")
+        print("  ~ May need tighter entry criteria or faster execution")
+    else:
+        print(f"  ✗ Weak signal: only {overall_profit_rate:.0f}% profitable")
+        print("  ✗ Spot-lag strategy may not be viable for these markets")
+
+
+def print_momentum_summary(df: pd.DataFrame) -> None:
+    """Print summary of momentum/spot-lag opportunities."""
+    if df.empty:
+        print("\nNo momentum data available.")
+        return
+
+    print("\n" + "=" * 60)
+    print("MOMENTUM / SPOT-LAG ANALYSIS")
+    print("=" * 60)
+    print("Tracks rapid price moves from <0.5 to >target within 90s window")
+    print("This detects when Polymarket lags behind spot price moves (e.g., Binance)")
+
+    latest = df.sort_values("timestamp").groupby("target_threshold").tail(1)
+
+    print(f"\n{'Target':<10} {'Count':<8} {'Avg Dur':<10} {'Min Dur':<10} {'Max Dur':<10} {'Avg Expiry':<12}")
+    print("-" * 65)
+
+    for _, row in latest.sort_values("target_threshold").iterrows():
+        target = row["target_threshold"]
+        count = int(row["count"])
+        avg_dur = row["avg_duration_s"]
+        min_dur = row["min_duration_s"]
+        max_dur = row["max_duration_s"]
+        avg_expiry = row["avg_expiry_s"]
+        print(f"≥{target:<9} {count:<8} {avg_dur:<10.1f}s {min_dur:<10.1f}s {max_dur:<10.1f}s {avg_expiry:<12.0f}s")
+
+    print("\nKey Insights:")
+    for _, row in latest.sort_values("target_threshold").iterrows():
+        target = row["target_threshold"]
+        count = int(row["count"])
+        avg_dur = row["avg_duration_s"]
+        avg_expiry = row["avg_expiry_s"]
+        
+        if count > 0:
+            if avg_dur < 30:
+                print(f"  • ≥{target}: Fast moves ({avg_dur:.1f}s avg) - requires quick reaction")
+            elif avg_dur < 60:
+                print(f"  • ≥{target}: Moderate moves ({avg_dur:.1f}s avg) - 30-60s entry window")
+            else:
+                print(f"  • ≥{target}: Slow moves ({avg_dur:.1f}s avg) - comfortable entry window")
+            
+            if avg_expiry < 300:
+                print(f"    → Typically occurs {avg_expiry:.0f}s before expiry (near-expiry)")
+            else:
+                print(f"    → Typically occurs {avg_expiry/60:.1f}min before expiry")
+
+    print("\nStrategy Implication:")
+    print("  • Monitor Binance spot price for BTC/ETH moves")
+    print("  • When spot confirms direction, enter Polymarket before odds catch up")
+    print("  • Target 80-95% fills after momentum is confirmed")
+
+
+def print_duration_symbol_summary(df: pd.DataFrame, top_n: int = 10) -> None:
+    """Print summary of per-symbol opportunity durations."""
+    if df.empty:
+        print("\nNo per-symbol duration data available.")
+        return
+
+    print("\n" + "=" * 70)
+    print("PER-SYMBOL OPPORTUNITY DURATION ANALYSIS")
+    print("=" * 70)
+    print("Markets where arbitrage opportunities last the longest")
+
+    # Get latest snapshot per symbol/timeframe/threshold
+    latest = df.sort_values("timestamp").groupby(["symbol", "timeframe", "threshold"]).tail(1)
+
+    # Focus on key thresholds
+    key_thresholds = [0.98, 0.99, 0.995, 1.0]
+    available_thresholds = latest["threshold"].unique()
+    focus_thresholds = [t for t in key_thresholds if t in available_thresholds]
+
+    if not focus_thresholds:
+        focus_thresholds = sorted(available_thresholds)[:3]
+
+    for th in focus_thresholds:
+        th_data = latest[latest["threshold"] == th].copy()
+        if th_data.empty:
+            continue
+
+        print(f"\n--- Threshold ≤{th} ---")
+
+        # Top by average duration
+        by_avg = th_data.sort_values("avg_ms", ascending=False).head(top_n)
+        print(f"\nTop {min(top_n, len(by_avg))} by Average Duration:")
+        print(f"{'Symbol':<12} {'TF':<5} {'Avg':<10} {'P90':<10} {'Med':<10} {'Max':<10} {'Count':<8}")
+        print("-" * 70)
+        for _, row in by_avg.iterrows():
+            print(
+                f"{row['symbol']:<12} {row['timeframe']:<5} "
+                f"{row['avg_ms']:<10.0f} {row['p90_ms']:<10.0f} {row['med_ms']:<10.0f} "
+                f"{row['max_ms']:<10.0f} {int(row['count']):<8}"
+            )
+
+        # Top by P90 duration
+        by_p90 = th_data.sort_values("p90_ms", ascending=False).head(top_n)
+        print(f"\nTop {min(top_n, len(by_p90))} by P90 Duration:")
+        print(f"{'Symbol':<12} {'TF':<5} {'P90':<10} {'Avg':<10} {'Max':<10} {'Count':<8}")
+        print("-" * 70)
+        for _, row in by_p90.iterrows():
+            print(
+                f"{row['symbol']:<12} {row['timeframe']:<5} "
+                f"{row['p90_ms']:<10.0f} {row['avg_ms']:<10.0f} "
+                f"{row['max_ms']:<10.0f} {int(row['count']):<8}"
+            )
+
+    # Overall summary
+    print("\n--- Key Insights ---")
+    for th in focus_thresholds:
+        th_data = latest[latest["threshold"] == th]
+        if th_data.empty or th_data["count"].sum() == 0:
+            continue
+        
+        # Weighted average duration across all symbols
+        total_count = th_data["count"].sum()
+        weighted_avg = (th_data["avg_ms"] * th_data["count"]).sum() / total_count
+        max_avg = th_data["avg_ms"].max()
+        best_symbol = th_data.loc[th_data["avg_ms"].idxmax(), "symbol"]
+        
+        print(f"  • ≤{th}: Overall weighted avg={weighted_avg:.0f}ms, best={best_symbol} ({max_avg:.0f}ms avg)")
 
 
 def print_opportunity_evaluation(
@@ -435,6 +678,42 @@ def main() -> None:
         plot_duration_distribution(duration_df, args.out_dir)
     else:
         print(f"\nNo duration CSV found at {duration_csv}")
+
+    # Load near-expiry high-price data if available
+    nearprice_csv = Path(str(args.csv).replace(".csv", "-nearprice.csv"))
+    nearprice_df = pd.DataFrame()
+    if nearprice_csv.exists():
+        nearprice_df = load_nearprice(nearprice_csv)
+        print_nearprice_summary(nearprice_df)
+    else:
+        print(f"\nNo nearprice CSV found at {nearprice_csv}")
+
+    # Load momentum/spot-lag data if available
+    momentum_csv = Path(str(args.csv).replace(".csv", "-momentum.csv"))
+    momentum_df = pd.DataFrame()
+    if momentum_csv.exists():
+        momentum_df = load_momentum(momentum_csv)
+        print_momentum_summary(momentum_df)
+    else:
+        print(f"\nNo momentum CSV found at {momentum_csv}")
+
+    # Load spot-lag correlation data (Bybit → Polymarket) if available
+    spotlag_csv = Path(str(args.csv).replace(".csv", "-spotlag.csv"))
+    spotlag_df = pd.DataFrame()
+    if spotlag_csv.exists():
+        spotlag_df = load_spotlag(spotlag_csv)
+        print_spotlag_summary(spotlag_df)
+    else:
+        print(f"\nNo spot-lag CSV found at {spotlag_csv}")
+
+    # Load per-symbol duration data if available
+    duration_symbol_csv = Path(str(args.csv).replace(".csv", "-duration-symbol.csv"))
+    duration_symbol_df = pd.DataFrame()
+    if duration_symbol_csv.exists():
+        duration_symbol_df = load_duration_symbol(duration_symbol_csv)
+        print_duration_symbol_summary(duration_symbol_df)
+    else:
+        print(f"\nNo per-symbol duration CSV found at {duration_symbol_csv}")
 
     # Print comprehensive opportunity evaluation
     print_opportunity_evaluation(all_rows, buckets_df, liquidity_df, duration_df)

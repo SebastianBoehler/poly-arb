@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1
+# Optimized C++ build with LTO for low-latency trading
 FROM debian:bookworm-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git libcurl4-openssl-dev libssl-dev ca-certificates \
-    autoconf automake libtool pkg-config zlib1g-dev && rm -rf /var/lib/apt/lists/*
+    autoconf automake libtool pkg-config zlib1g-dev lld && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY . .
 
+# Build with LTO enabled for 5-15% performance improvement
 RUN mkdir -p build && cd build \
-    && cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=ON \
     && make -j$(nproc) arb_test
 
 FROM debian:bookworm-slim
