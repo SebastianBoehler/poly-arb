@@ -76,7 +76,16 @@ export type TimeToExpiryHits = Record<number, Record<string, number>>; // thresh
 export type ThresholdLiquidity = Record<number, { sumUsd: number; count: number; maxUsd: number }>;
 
 // Tracks opportunity duration (how long combined price stays below threshold)
-export type ThresholdDuration = Record<number, { sumMs: number; count: number; maxMs: number; minMs: number }>;
+export type ThresholdDuration = Record<
+  number,
+  {
+    sumMs: number;
+    count: number;
+    maxMs: number;
+    minMs: number;
+    samples: number[]; // capped rolling buffer of durations for p90/rolling metrics
+  }
+>;
 
 // Active opportunity state for a market at a specific threshold
 export interface ActiveOpportunity {
@@ -98,6 +107,7 @@ export interface StatsMarketTracker {
   hits: ThresholdHits;
   priceSums: ThresholdPriceSums; // Track YES/NO prices when thresholds hit
   lastCombined: number;
+  lastBookTs?: number;
   // Store full orderbook for liquidity analysis
   asksYes: OrderbookLevel[];
   asksNo: OrderbookLevel[];

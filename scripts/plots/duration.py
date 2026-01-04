@@ -9,7 +9,7 @@ from .common import setup_deepseek_style, DEEPSEEK_COLORS
 
 
 def plot_duration_by_threshold(df: pd.DataFrame, out_dir: Path) -> None:
-    """Bar chart showing average, min, and max duration by threshold."""
+    """Bar chart showing average, p90, and max duration by threshold."""
     if df.empty:
         return
     
@@ -20,9 +20,9 @@ def plot_duration_by_threshold(df: pd.DataFrame, out_dir: Path) -> None:
     latest = latest.sort_values("threshold")
     
     thresholds = latest["threshold"].tolist()
-    avg_ms = latest["avg_ms"].tolist()
-    min_ms = latest["min_ms"].tolist()
-    max_ms = latest["max_ms"].tolist()
+    avg_ms = pd.to_numeric(latest["avg_ms"], errors="coerce").fillna(0).tolist()
+    p90_ms = pd.to_numeric(latest.get("p90_ms", pd.Series([None]*len(latest))), errors="coerce").fillna(0).tolist()
+    max_ms = pd.to_numeric(latest["max_ms"], errors="coerce").fillna(0).tolist()
     
     fig, ax = plt.subplots(figsize=(12, 5))
     
@@ -30,11 +30,11 @@ def plot_duration_by_threshold(df: pd.DataFrame, out_dir: Path) -> None:
     bar_width = 0.25
     
     bars_avg = ax.bar([i - bar_width for i in x], avg_ms, bar_width,
-                       label='Avg Duration', color=DEEPSEEK_COLORS[0])
-    bars_min = ax.bar([i for i in x], min_ms, bar_width,
-                       label='Min Duration', color=DEEPSEEK_COLORS[2])
+                       label='Avg', color=DEEPSEEK_COLORS[0])
+    bars_p90 = ax.bar([i for i in x], p90_ms, bar_width,
+                       label='P90', color=DEEPSEEK_COLORS[2])
     bars_max = ax.bar([i + bar_width for i in x], max_ms, bar_width,
-                       label='Max Duration', color=DEEPSEEK_COLORS[4])
+                       label='Max', color=DEEPSEEK_COLORS[4])
     
     ax.set_xlabel("Combined Price Threshold")
     ax.set_ylabel("Duration (ms)")
@@ -65,7 +65,7 @@ def plot_duration_by_threshold(df: pd.DataFrame, out_dir: Path) -> None:
 
 
 def plot_duration_timeline(df: pd.DataFrame, out_dir: Path) -> None:
-    """Time series of opportunity duration over time."""
+    """Time series of opportunity duration over time (p90 + rolling p90)."""
     if df.empty or len(df) < 2:
         return
     
@@ -87,16 +87,31 @@ def plot_duration_timeline(df: pd.DataFrame, out_dir: Path) -> None:
         if len(th_data) < 2:
             continue
         has_data = True
-        ax.plot(th_data["timestamp"], th_data["avg_ms"],
-                label=f"≤{th}", color=DEEPSEEK_COLORS[idx % len(DEEPSEEK_COLORS)],
-                linewidth=1.5, alpha=0.8)
+        ax.plot(
+            th_data["timestamp"],
+            th_data.get("p90_ms", th_data["avg_ms"]),
+            label=f"≤{th} p90",
+            color=DEEPSEEK_COLORS[idx % len(DEEPSEEK_COLORS)],
+            linewidth=1.8,
+            alpha=0.9,
+        )
+        if "rolling_p90_ms" in th_data:
+            ax.plot(
+                th_data["timestamp"],
+                th_data["rolling_p90_ms"],
+                label=f"≤{th} roll p90",
+                color=DEEPSEEK_COLORS[(idx + 2) % len(DEEPSEEK_COLORS)],
+                linewidth=1.2,
+                alpha=0.6,
+                linestyle="--",
+            )
     
     if not has_data:
         plt.close()
         return
     
     ax.set_xlabel("Time")
-    ax.set_ylabel("Average Duration (ms)")
+    ax.set_ylabel("Duration (ms)")
     ax.legend(loc='upper right', frameon=True)
     ax.yaxis.grid(True, alpha=0.3)
     ax.xaxis.grid(False)

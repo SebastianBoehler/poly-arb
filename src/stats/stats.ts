@@ -27,6 +27,10 @@ import type {
 import { bumpThresholdHits, bumpThresholdPriceSums, getExpiryBucket, bumpTimeToExpiryHits } from "./utils";
 import { getMarketExpiry, formatExpiry, extractSymbol } from "../core/utils";
 
+const durationSampleCap = 1000; // keep last N durations per threshold for rolling stats
+const durationHardCapMs = 20000; // cap single duration to avoid WS-stall inflation
+const reconnectGapMs = 5000; // treat longer gaps as reconnect and reset active windows
+
 let lastPrintSamples = 0;
 let lastPrintAt = Date.now();
 let lastPrintMessages = 0;
@@ -39,6 +43,28 @@ let overallPriceSums: ThresholdPriceSums = {};
 let overallExpiryHits: TimeToExpiryHits = {};
 let overallLiquidity: ThresholdLiquidity = {};
 let overallDuration: ThresholdDuration = {};
+
+function ensureDuration(th: number): Required<ThresholdDuration>[number] {
+  if (!overallDuration[th]) {
+    overallDuration[th] = { sumMs: 0, count: 0, maxMs: 0, minMs: Number.POSITIVE_INFINITY, samples: [] };
+  }
+  return overallDuration[th] as Required<ThresholdDuration>[number];
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) return (sorted[mid - 1] + sorted[mid]) / 2;
+  return sorted[mid];
+}
+
+function p90(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.floor(0.9 * (sorted.length - 1));
+  return sorted[idx];
+}
 
 // Preserve historical per-symbol stats when markets expire
 const historicalSymbolStats = new Map<string, { samples: number; hits: ThresholdHits; priceSums: ThresholdPriceSums }>();
@@ -511,6 +537,13 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
   if (bestAskYes > 0 && bestAskNo > 0) {
     const combined = bestAskYes + bestAskNo;
     const now = Date.now();
+
+    // If we had a long gap since last book update, reset active opportunities to avoid spanning WS stalls
+    if (entry.market.lastBookTs && now - entry.market.lastBookTs > reconnectGapMs) {
+      entry.market.activeOpportunities.clear();
+    }
+    entry.market.lastBookTs = now;
+
     entry.market.lastCombined = Math.min(entry.market.lastCombined, combined);
     entry.market.updates += 1;
     totalCombinedSamples += 1;
@@ -531,16 +564,19 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
       } else if (!isOpportunity && wasActive) {
         // Opportunity just ended - record duration
         const startedAt = entry.market.activeOpportunities.get(th)!;
-        const durationMs = now - startedAt;
+        const rawDuration = now - startedAt;
+        const durationMs = Math.min(rawDuration, durationHardCapMs);
         entry.market.activeOpportunities.delete(th);
 
-        if (!overallDuration[th]) {
-          overallDuration[th] = { sumMs: 0, count: 0, maxMs: 0, minMs: Number.POSITIVE_INFINITY };
+        const dur = ensureDuration(th);
+        dur.sumMs += durationMs;
+        dur.count += 1;
+        dur.maxMs = Math.max(dur.maxMs, durationMs);
+        dur.minMs = Math.min(dur.minMs, durationMs);
+        dur.samples.push(durationMs);
+        if (dur.samples.length > durationSampleCap) {
+          dur.samples.shift();
         }
-        overallDuration[th].sumMs += durationMs;
-        overallDuration[th].count += 1;
-        overallDuration[th].maxMs = Math.max(overallDuration[th].maxMs, durationMs);
-        overallDuration[th].minMs = Math.min(overallDuration[th].minMs, durationMs);
       }
       // If still active (isOpportunity && wasActive), keep tracking
     }
@@ -676,7 +712,7 @@ function writeLiquidityCsv(path: string, ts: string) {
 
 function writeDurationCsv(path: string, ts: string) {
   // Ensure header exists
-  const header = ["timestamp", "threshold", "avg_ms", "min_ms", "max_ms", "count"].join(",") + "\n";
+  const header = ["timestamp", "threshold", "avg_ms", "p90_ms", "med_ms", "rolling_p90_ms", "min_ms", "max_ms", "count"].join(",") + "\n";
   if (!existsSync(path)) {
     writeFileSync(path, header, { encoding: "utf8" });
   }
@@ -687,7 +723,10 @@ function writeDurationCsv(path: string, ts: string) {
     if (!dur || dur.count === 0) continue;
     const avgMs = (dur.sumMs / dur.count).toFixed(0);
     const minMs = dur.minMs === Number.POSITIVE_INFINITY ? "0" : dur.minMs.toFixed(0);
-    buf += [ts, th.toString(), avgMs, minMs, dur.maxMs.toFixed(0), dur.count.toString()].join(",") + "\n";
+    const p90Ms = p90(dur.samples).toFixed(0);
+    const medMs = median(dur.samples).toFixed(0);
+    const rollingP90 = p90(dur.samples.slice(-durationSampleCap)).toFixed(0);
+    buf += [ts, th.toString(), avgMs, p90Ms, medMs, rollingP90, minMs, dur.maxMs.toFixed(0), dur.count.toString()].join(",") + "\n";
   }
   appendFileSync(path, buf, { encoding: "utf8" });
 }

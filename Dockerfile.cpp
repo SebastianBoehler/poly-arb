@@ -33,7 +33,7 @@ RUN mkdir -p build && cd build \
     && cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_FLAGS="-O3 -DNDEBUG" \
-    && make -j$(nproc) arb_test
+    && make -j$(nproc) arb_test order_benchmark
 
 # Stage 2: Minimal runtime
 FROM debian:bookworm-slim AS runner
@@ -51,8 +51,9 @@ RUN useradd --system --uid 1001 --create-home appuser
 
 WORKDIR /app
 
-# Copy only the binary
+# Copy binaries
 COPY --from=builder /app/cpp/build/arb_test ./arb_test
+COPY --from=builder /app/cpp/build/order_benchmark ./order_benchmark
 
 # Set ownership
 RUN chown -R appuser:appuser /app

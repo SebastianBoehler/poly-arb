@@ -321,9 +321,9 @@ int main(int argc, char *argv[])
     std::mutex price_mutex;
 
     WebSocketClient ws;
-    ws.set_url("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+    ws.set_url("wss://ws-live-data.polymarket.com");
     ws.set_auto_reconnect(true);
-    ws.set_ping_interval_ms(10000);
+    ws.set_ping_interval_ms(5000);
 
     ws.on_connect([&]()
                   {
@@ -333,39 +333,59 @@ int main(int argc, char *argv[])
         // Subscribe to orderbook updates for both tokens (Polymarket format)
         json token_array = json::array({market.token_yes, market.token_no});
         
-        // Subscribe to agg_orderbook - gives full orderbook depth for size calculation
+        // Subscribe to agg_orderbook - use "action" not "type" per real-time-data-client
         json subscribe_msg;
-        subscribe_msg["type"] = "subscribe";
+        subscribe_msg["action"] = "subscribe";
         subscribe_msg["subscriptions"] = json::array({
             {{"topic", "clob_market"}, {"type", "agg_orderbook"}, {"filters", token_array.dump()}}
         });
-        ws.send(subscribe_msg.dump());
         
-        std::cout << "    Subscribed to agg_orderbook\n"; });
+        std::string msg_str = subscribe_msg.dump();
+        std::cout << "    Subscribing with: " << msg_str.substr(0, 200) << "...\n";
+        ws.send(msg_str);
+        
+        std::cout << "    Subscribed to agg_orderbook\n";
+        std::cout << "    YES token: " << market.token_yes.substr(0, 30) << "...\n";
+        std::cout << "    NO token:  " << market.token_no.substr(0, 30) << "...\n"; });
 
     ws.on_message([&](const std::string &msg)
                   {
         try {
             auto j = json::parse(msg);
             
-            // Polymarket WebSocket format: { topic, type, payload }
-            std::string topic = j.value("topic", "");
-            std::string type = j.value("type", "");
+            // ws-live-data format: { connection_id, payload: { asset_id, asks, bids } }
+            // OR old format: { topic, type, payload }
+            if (!j.contains("payload")) return;
+            auto payload = j["payload"];
             
-            // Handle agg_orderbook updates (full orderbook with asks/bids)
-            if (topic == "clob_market" && type == "agg_orderbook") {
-                if (!j.contains("payload")) return;
-                auto payload = j["payload"];
+            // Handle array of orderbooks (initial snapshot)
+            if (payload.is_array()) {
+                for (const auto& book : payload) {
+                    std::string asset_id = book.value("asset_id", "");
+                    if (book.contains("asks") && !book["asks"].empty()) {
+                        double best = 1.0;
+                        for (const auto& ask : book["asks"]) {
+                            double price = std::stod(ask["price"].get<std::string>());
+                            if (price < best) best = price;
+                        }
+                        std::lock_guard<std::mutex> lock(price_mutex);
+                        if (asset_id == market.token_yes) {
+                            ws_best_ask_yes.store(best);
+                        } else if (asset_id == market.token_no) {
+                            ws_best_ask_no.store(best);
+                        }
+                    }
+                }
+            }
+            // Handle single orderbook update
+            else if (payload.is_object()) {
                 std::string asset_id = payload.value("asset_id", "");
-                
                 if (payload.contains("asks") && !payload["asks"].empty()) {
-                    // Find best (lowest) ask
                     double best = 1.0;
                     for (const auto& ask : payload["asks"]) {
                         double price = std::stod(ask["price"].get<std::string>());
                         if (price < best) best = price;
                     }
-                    
                     std::lock_guard<std::mutex> lock(price_mutex);
                     if (asset_id == market.token_yes) {
                         ws_best_ask_yes.store(best);
@@ -480,7 +500,27 @@ int main(int argc, char *argv[])
             ws_best_ask_no.store(0.5);
             ws_connected.store(false);
 
-            ws.set_url("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+            // Re-register callbacks with new market tokens (captures by ref so market is updated)
+            ws.on_connect([&]()
+                          {
+                std::cout << "    WebSocket connected!\n";
+                ws_connected.store(true);
+
+                // Subscribe to orderbook updates for both tokens (uses updated market tokens)
+                json token_array = json::array({market.token_yes, market.token_no});
+                
+                json subscribe_msg;
+                subscribe_msg["action"] = "subscribe";
+                subscribe_msg["subscriptions"] = json::array({
+                    {{"topic", "clob_market"}, {"type", "agg_orderbook"}, {"filters", token_array.dump()}}
+                });
+                ws.send(subscribe_msg.dump());
+                
+                std::cout << "    Subscribed to agg_orderbook for new market\n";
+                std::cout << "    YES token: " << market.token_yes.substr(0, 20) << "...\n";
+                std::cout << "    NO token:  " << market.token_no.substr(0, 20) << "...\n"; });
+
+            ws.set_url("wss://ws-live-data.polymarket.com");
             ws_thread = std::thread([&ws]()
                                     {
                 ws.connect();
@@ -531,26 +571,34 @@ int main(int argc, char *argv[])
     std::cout << "    Combined: " << combined << " < " << trigger_combined << "\n";
     std::cout << "    Potential profit: " << std::fixed << std::setprecision(4) << (1.0 - combined) * 100 << "%\n";
 
-    // Calculate order amounts
+    // Calculate order amounts using integer math throughout to avoid floating point issues
     double slippage = 0.01; // 1 cent slippage buffer
-    double yes_price = std::floor((market.best_ask_yes + slippage) * 100) / 100;
-    double no_price = std::floor((market.best_ask_no + slippage) * 100) / 100;
 
-    // Cap at 0.99
-    yes_price = std::min(yes_price, 0.99);
-    no_price = std::min(no_price, 0.99);
+    // Use integer cents for all calculations (2 decimal precision)
+    int64_t yes_price_cents = static_cast<int64_t>((market.best_ask_yes + slippage) * 100);
+    int64_t no_price_cents = static_cast<int64_t>((market.best_ask_no + slippage) * 100);
 
-    double maker_amount = std::floor(size_usdc * 100) / 100; // Round to 2 decimals
+    // Cap at 99 cents (0.99)
+    if (yes_price_cents > 99)
+        yes_price_cents = 99;
+    if (no_price_cents > 99)
+        no_price_cents = 99;
 
-    // Calculate taker amounts (shares) - match TS client rounding
-    double yes_taker_raw = maker_amount / yes_price;
-    double no_taker_raw = maker_amount / no_price;
+    // Convert back to double with exactly 2 decimals
+    double yes_price = yes_price_cents / 100.0;
+    double no_price = no_price_cents / 100.0;
 
-    // TS rounding: roundUp to 8 decimals, then roundDown to 4 decimals
-    yes_taker_raw = std::ceil(yes_taker_raw * 100000000) / 100000000;
-    yes_taker_raw = std::floor(yes_taker_raw * 10000) / 10000;
-    no_taker_raw = std::ceil(no_taker_raw * 100000000) / 100000000;
-    no_taker_raw = std::floor(no_taker_raw * 10000) / 10000;
+    // Maker amount in cents (2 decimals)
+    int64_t maker_cents = static_cast<int64_t>(size_usdc * 100);
+    double maker_amount = maker_cents / 100.0;
+
+    // Calculate taker amounts (shares) with 2 decimal precision (same as maker for simplicity)
+    // taker = maker / price, use integer math: (maker_cents * 100) / price_cents
+    // This gives us shares * 100 (2 decimals)
+    int64_t yes_taker_int = (maker_cents * 100) / yes_price_cents;
+    int64_t no_taker_int = (maker_cents * 100) / no_price_cents;
+    double yes_taker_raw = yes_taker_int / 100.0;
+    double no_taker_raw = no_taker_int / 100.0;
 
     double combined_with_slippage = yes_price + no_price;
 
@@ -637,7 +685,7 @@ int main(int argc, char *argv[])
         yes_payload["deferExec"] = false;
         yes_payload["order"] = order_obj;
         yes_payload["owner"] = creds.api_key;
-        yes_payload["orderType"] = "FOK"; // Fill-Or-Kill for immediate execution
+        yes_payload["orderType"] = "FAK"; // Fill-And-Kill for partial fills
     }
 
     nlohmann::ordered_json no_payload;
@@ -659,7 +707,7 @@ int main(int argc, char *argv[])
         no_payload["deferExec"] = false;
         no_payload["order"] = order_obj;
         no_payload["owner"] = creds.api_key;
-        no_payload["orderType"] = "FOK";
+        no_payload["orderType"] = "FAK"; // Fill-And-Kill for partial fills
     }
 
     // Batch array - convert ordered_json to regular json for array
@@ -748,23 +796,135 @@ int main(int argc, char *argv[])
                 std::cout << "    Min shares (pair): " << min_shares << "\n";
                 std::cout << "    Guaranteed payout: $" << guaranteed_payout << "\n";
                 std::cout << "    Profit:            $" << profit << " (" << (profit / total_cost * 100) << "%)\n";
+
+                // SUCCESS! Both orders filled - exit the program
+                std::cout << "\n    🎉 SUCCESS! Both legs filled. Exiting.\n";
+                http_global_cleanup();
+                return 0;
             }
             else if (yes_filled || no_filled)
             {
                 std::cout << "\n    ⚠️  PARTIAL FILL - One side filled, other didn't!\n";
-                std::cout << "    Consider selling the filled position to exit.\n";
+                std::cout << "    Closing position at entry price to exit with 0 PnL...\n";
+
+                // Determine which side filled and close it
+                std::string filled_token = yes_filled ? market.token_yes : market.token_no;
+                double filled_shares = yes_filled ? yes_shares : no_shares;
+                double entry_price = yes_filled ? yes_price : no_price;
+                std::string side_name = yes_filled ? "YES" : "NO";
+
+                // Use exact shares from API response - don't round, the to_wei function handles precision
+                double sell_shares = filled_shares;
+
+                if (sell_shares > 0)
+                {
+                    // Wait for trade to settle before selling
+                    std::cout << "\n    Waiting 2s for trade settlement...\n";
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+                    std::cout << "\n[8] Creating SELL order to close " << side_name << " position...\n";
+                    std::cout << "    Selling " << sell_shares << " shares @ " << entry_price << "\n";
+
+                    // Create sell order at entry price
+                    OrderData sell_order;
+                    sell_order.maker = funder_address;
+                    sell_order.taker = "0x0000000000000000000000000000000000000000";
+                    sell_order.token_id = filled_token;
+                    // For SELL: maker_amount = shares (2 decimals), taker_amount = USDC (4 decimals)
+                    sell_order.maker_amount = to_wei(sell_shares, 6);
+                    double usdc_expected = sell_shares * entry_price;
+                    sell_order.taker_amount = to_wei(usdc_expected, 6);
+                    sell_order.side = OrderSide::SELL;
+                    sell_order.fee_rate_bps = "0";
+                    sell_order.nonce = "0";
+                    sell_order.signer = signer.address();
+                    sell_order.expiration = "0";
+                    sell_order.signature_type = (funder_address != signer.address())
+                                                    ? SignatureType::POLY_GNOSIS_SAFE
+                                                    : SignatureType::EOA;
+
+                    auto sell_signed = signer.sign_order(sell_order, market.exchange_address);
+
+                    // Build sell order payload
+                    nlohmann::ordered_json sell_payload;
+                    nlohmann::ordered_json sell_order_obj;
+                    sell_order_obj["salt"] = std::stoll(sell_signed.salt);
+                    sell_order_obj["maker"] = sell_signed.maker;
+                    sell_order_obj["signer"] = sell_signed.signer;
+                    sell_order_obj["taker"] = sell_signed.taker;
+                    sell_order_obj["tokenId"] = sell_signed.token_id;
+                    sell_order_obj["makerAmount"] = sell_signed.maker_amount;
+                    sell_order_obj["takerAmount"] = sell_signed.taker_amount;
+                    sell_order_obj["side"] = "SELL";
+                    sell_order_obj["expiration"] = sell_signed.expiration;
+                    sell_order_obj["nonce"] = sell_signed.nonce;
+                    sell_order_obj["feeRateBps"] = sell_signed.fee_rate_bps;
+                    sell_order_obj["signatureType"] = static_cast<int>(sell_signed.signature_type);
+                    sell_order_obj["signature"] = sell_signed.signature;
+                    sell_payload["deferExec"] = false;
+                    sell_payload["order"] = sell_order_obj;
+                    sell_payload["owner"] = creds.api_key;
+                    sell_payload["orderType"] = "GTC"; // Good-Til-Cancelled to ensure it fills
+
+                    std::string sell_body = sell_payload.dump();
+                    auto sell_l2 = signer.generate_l2_headers(creds, "POST", "/order", sell_body, funder_address);
+
+                    std::map<std::string, std::string> sell_headers;
+                    sell_headers["Content-Type"] = "application/json";
+                    sell_headers["POLY_ADDRESS"] = sell_l2.poly_address;
+                    sell_headers["POLY_SIGNATURE"] = sell_l2.poly_signature;
+                    sell_headers["POLY_TIMESTAMP"] = sell_l2.poly_timestamp;
+                    sell_headers["POLY_API_KEY"] = sell_l2.poly_api_key;
+                    sell_headers["POLY_PASSPHRASE"] = sell_l2.poly_passphrase;
+
+                    auto sell_response = http.post("/order", sell_body, sell_headers);
+
+                    if (sell_response.ok())
+                    {
+                        auto sell_result = json::parse(sell_response.body);
+                        bool sell_success = sell_result.value("success", false);
+                        if (sell_success && sell_result.contains("orderID"))
+                        {
+                            std::cout << "    ✅ SELL order placed: " << sell_result["orderID"].get<std::string>() << "\n";
+                            std::cout << "    Position will close at entry price (0 PnL)\n";
+                        }
+                        else
+                        {
+                            std::cout << "    ❌ SELL order failed: " << sell_result.value("errorMsg", "unknown") << "\n";
+                        }
+                    }
+                    else
+                    {
+                        std::cout << "    ❌ SELL request failed: " << sell_response.body << "\n";
+                    }
+                }
+            }
+            else
+            {
+                // Neither filled - continue monitoring for next opportunity
+                std::cout << "\n    Neither order filled. Continuing to monitor...\n\n";
             }
         }
         else
         {
             std::cout << "    Unexpected response format: " << response.body << "\n";
+            std::cout << "    Continuing to monitor...\n\n";
         }
     }
     else
     {
         std::cout << "    Error: " << response.body << "\n";
+        std::cout << "    Continuing to monitor...\n\n";
     }
 
-    http_global_cleanup();
-    return 0;
+    // Continue running - go back to monitoring
+    std::cout << "=== Restarting monitoring loop ===\n\n";
+
+    // Small delay before restarting
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    // Re-execute main to restart the monitoring loop
+    // This is a simple approach - in production you'd refactor to a proper loop
+    char *argv_fake[] = {(char *)"arb_test", nullptr};
+    return main(1, argv_fake);
 }

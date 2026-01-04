@@ -63,7 +63,11 @@ def load_liquidity(csv_path: Path) -> pd.DataFrame:
 
 def load_duration(csv_path: Path) -> pd.DataFrame:
     """Load duration CSV data."""
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, on_bad_lines="skip", engine="python")
+    # Backward compatibility: add missing columns if older runs had fewer fields
+    for col in ["p90_ms", "med_ms", "rolling_p90_ms"]:
+        if col not in df.columns:
+            df[col] = pd.NA
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
 

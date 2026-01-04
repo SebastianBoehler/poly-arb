@@ -2,17 +2,29 @@
 set -e
 
 # GCloud deployment script for Polymarket C++ Arbitrage Bot
-# Polymarket servers: eu-west-2 (London), closest non-georestricted: eu-west-1 (Ireland)
-# Default: europe-west4 (Netherlands) for lowest latency to Polymarket
+#
+# Polymarket CLOB API: NOT Cloudflare blocked on GCloud PREMIUM network
+# Tested: c3-standard-4 + PREMIUM tier = 32-38ms RTT (~16ms one-way)
+#
+# Polymarket servers: eu-west-2 (London)
+# Default zone: europe-west4 (Netherlands) for lowest latency
 
 # Configuration
 PROJECT_ID="${GCP_PROJECT_ID:-}"
 INSTANCE_NAME="${INSTANCE_NAME:-poly-arb-bot}"
 ZONE="${ZONE:-europe-west4-a}"
-MACHINE_TYPE="${MACHINE_TYPE:-e2-medium}"
+# Machine types for trading (low to high performance):
+#   e2-medium     - Budget, shared CPU, variable latency
+#   c3-standard-4 - Compute-optimized, dedicated CPU, low jitter (RECOMMENDED)
+#   c3-highcpu-4  - Even lower latency, less RAM
+#   c3-standard-8 - More cores for parallel processing
+MACHINE_TYPE="${MACHINE_TYPE:-c3-standard-4}"
+# Network tier: PREMIUM for lowest latency routing, STANDARD for cost savings
+NETWORK_TIER="${NETWORK_TIER:-PREMIUM}"
 IMAGE_NAME="poly-arb-cpp"
 
-# Residential proxy (for Cloudflare bypass)
+# Proxy (optional - GCloud PREMIUM network is NOT blocked)
+# Only needed if you encounter Cloudflare issues on specific IPs
 PROXY_URL="${HTTP_PROXY:-}"
 
 # Colors
@@ -83,6 +95,23 @@ push_to_gcr() {
     echo ""
 }
 
+# Kernel tuning startup script for low-latency TCP
+STARTUP_SCRIPT='#!/bin/bash
+# TCP low-latency tuning for trading
+sysctl -w net.ipv4.tcp_low_latency=1
+sysctl -w net.ipv4.tcp_fastopen=3
+sysctl -w net.ipv4.tcp_nodelay=1
+sysctl -w net.ipv4.tcp_timestamps=1
+sysctl -w net.ipv4.tcp_sack=1
+sysctl -w net.ipv4.tcp_window_scaling=1
+sysctl -w net.core.rmem_max=16777216
+sysctl -w net.core.wmem_max=16777216
+sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216"
+sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216"
+sysctl -w net.core.netdev_max_backlog=30000
+echo "TCP low-latency tuning applied"
+'
+
 # Create or update GCE instance
 deploy_gce() {
     echo "[4/6] Deploying to GCE..."
@@ -95,9 +124,9 @@ deploy_gce() {
             --project=$PROJECT_ID \
             --container-image=gcr.io/$PROJECT_ID/$IMAGE_NAME:latest
     else
-        echo "  Creating new instance..."
+        echo "  Creating new instance with TCP tuning..."
         
-        # Create instance with container-optimized OS
+        # Create instance with container-optimized OS and low-latency networking
         gcloud compute instances create-with-container $INSTANCE_NAME \
             --zone=$ZONE \
             --project=$PROJECT_ID \
@@ -115,7 +144,9 @@ deploy_gce() {
             --container-env="HTTP_PROXY=${HTTP_PROXY:-}" \
             --container-restart-policy=always \
             --tags=poly-arb \
-            --scopes=default,logging-write
+            --scopes=default,logging-write \
+            --network-tier=$NETWORK_TIER \
+            --metadata=startup-script="$STARTUP_SCRIPT"
     fi
     
     echo -e "${GREEN}✓ Deployed to GCE${NC}"

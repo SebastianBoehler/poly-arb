@@ -24,6 +24,7 @@
 #include <numeric>
 #include <algorithm>
 #include <thread>
+#include <cstring>
 
 using json = nlohmann::json;
 using namespace polymarket;
@@ -75,6 +76,18 @@ int main(int argc, char *argv[])
     HttpClient http;
     http.set_base_url(CLOB_API);
     http.set_timeout_ms(10000);
+
+    // Use proxy if configured (required for GCloud - Cloudflare blocked)
+    const char *proxy_env = std::getenv("HTTP_PROXY");
+    if (proxy_env && strlen(proxy_env) > 0)
+    {
+        http.set_proxy(proxy_env);
+        std::cout << "Using proxy: " << std::string(proxy_env).substr(0, 30) << "...\n";
+    }
+    else
+    {
+        std::cout << "WARNING: No HTTP_PROXY set - may be Cloudflare blocked\n";
+    }
 
     // Derive API credentials
     std::cout << "Deriving API credentials...\n";
@@ -191,8 +204,8 @@ int main(int argc, char *argv[])
     for (int i = 0; i < num_orders; i++)
     {
         double price = 0.50;    // Fixed price for benchmark
-        double size_usdc = 5.0; // $5 minimum for market orders
-        double shares = 10.0;   // $5 at 0.50 = 10 shares
+        double size_usdc = 1.0; // $1 per order
+        double shares = 2.0;    // $1 at 0.50 = 2 shares
 
         // Time the sign phase
         auto sign_start = std::chrono::high_resolution_clock::now();
@@ -324,10 +337,11 @@ int main(int argc, char *argv[])
     double success_rate = (static_cast<double>(success_count) / results.size()) * 100;
 
     std::cout << "Average sign time:  " << std::fixed << std::setprecision(1) << avg_sign << " ms\n";
-    std::cout << "Average post time:  " << avg_post << " ms\n";
+    std::cout << "Average post time:  " << avg_post << " ms (RTT)\n";
     std::cout << "Average total time: " << avg_total << " ms\n";
     std::cout << "Min total time:     " << min_total << " ms\n";
     std::cout << "Max total time:     " << max_total << " ms\n";
+    std::cout << "Est. one-way:       " << (min_total / 2.0) << " ms (order hits server)\n";
     std::cout << "Success rate:       " << std::setprecision(0) << success_rate << "%\n";
 
     // Output JSON for comparison
@@ -340,6 +354,7 @@ int main(int argc, char *argv[])
     output["avgTotalMs"] = avg_total;
     output["minTotalMs"] = min_total;
     output["maxTotalMs"] = max_total;
+    output["estOneWayMs"] = min_total / 2.0;
     output["successRate"] = success_rate;
     std::cout << output.dump(2) << std::endl;
 
