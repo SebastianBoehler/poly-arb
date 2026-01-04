@@ -161,7 +161,7 @@ export class BybitSpotClient {
       this.attemptReconnect();
     });
 
-    this.ws.on("error", (err) => {
+    this.ws.on("error", (err: Error) => {
       console.error(`[Bybit] WebSocket error:`, err.message);
     });
   }
