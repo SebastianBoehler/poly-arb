@@ -616,7 +616,7 @@ def print_opportunity_evaluation(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze stats CSV.")
-    parser.add_argument("--csv", type=Path, default=Path("overnight.csv"))
+    parser.add_argument("--csv", type=Path, default=Path("stats-summary.csv"))
     parser.add_argument("--out-dir", type=Path, default=Path("plots"))
     args = parser.parse_args()
 
