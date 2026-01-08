@@ -35,6 +35,7 @@ from plots import (
     plot_duration_distribution,
     plot_duration_by_expiry,
     plot_duration_by_expiry_lines,
+    plot_lowprice_heatmap,
 )
 from plots.common import threshold_cols, avg_yes_cols, avg_no_cols
 
@@ -83,6 +84,13 @@ def load_duration_expiry(csv_path: Path) -> pd.DataFrame:
 
 def load_nearprice(csv_path: Path) -> pd.DataFrame:
     """Load near-expiry high-price data."""
+    df = pd.read_csv(csv_path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+
+def load_lowprice(csv_path: Path) -> pd.DataFrame:
+    """Load near-expiry low-price data."""
     df = pd.read_csv(csv_path)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
@@ -288,6 +296,43 @@ def print_nearprice_summary(df: pd.DataFrame) -> None:
     print("\nInterpretation:")
     print("  • High percentages in sub-60s buckets suggest 0.95+/0.99 pricing only shows up right before expiry.")
     print("  • If mass is in minutes buckets, there may be safer early entries at high prices.")
+
+
+def print_lowprice_summary(df: pd.DataFrame) -> None:
+    if df.empty:
+        print("\nNo low-price dust data available.")
+        return
+
+    print("\n" + "=" * 60)
+    print("LOW-PRICE DUST ANALYSIS (single leg)")
+    print("=" * 60)
+
+    latest = df.sort_values("timestamp").groupby(["side", "threshold"]).tail(1)
+
+    bucket_order = [
+        "pct_0-5s",
+        "pct_5-15s",
+        "pct_15-30s",
+        "pct_30-60s",
+        "pct_60-300s",
+        "pct_5-15m",
+        "pct_15-60m",
+        "pct_60+m",
+    ]
+
+    print(f"\n{'Side':<6} {'Thr':<6} " + " ".join([b.replace('pct_', '').ljust(9) for b in bucket_order]))
+    print("-" * 72)
+    for _, row in latest.sort_values(["side", "threshold"]).iterrows():
+        line = f"{row['side']:<6} {row['threshold']:<6} "
+        parts = []
+        for b in bucket_order:
+            pct = row.get(b, 0)
+            parts.append(f"{pct:>8.1f}%")
+        print(line + " ".join(parts))
+
+    print("\nInterpretation:")
+    print("  • Dust shows where 1-5c legs actually appear in the lifecycle.")
+    print("  • If dust concentrates minutes before expiry, entries may need tight timing.")
 
 
 def load_duration_symbol(csv_path: Path) -> pd.DataFrame:
@@ -735,6 +780,16 @@ def main() -> None:
         print_nearprice_summary(nearprice_df)
     else:
         print(f"\nNo nearprice CSV found at {nearprice_csv}")
+
+    # Load near-expiry low-price data if available
+    lowprice_csv = Path(str(args.csv).replace(".csv", "-lowprice.csv"))
+    lowprice_df = pd.DataFrame()
+    if lowprice_csv.exists():
+        lowprice_df = load_lowprice(lowprice_csv)
+        print_lowprice_summary(lowprice_df)
+        plot_lowprice_heatmap(lowprice_df, args.out_dir)
+    else:
+        print(f"\nNo lowprice CSV found at {lowprice_csv}")
 
     # Load momentum/spot-lag data if available
     momentum_csv = Path(str(args.csv).replace(".csv", "-momentum.csv"))
