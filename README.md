@@ -248,6 +248,12 @@ Detailed breakdown of hit rates per symbol across all tracked thresholds.
 
 ![Hit Rates](plots/hit_rates_per_symbol.png)
 
+### Opportunity Timeline
+
+Shows when arbitrage hits occur over time to highlight session-dependent opportunity bursts.
+
+![Opportunity Timeline](plots/opportunity_timeline.png)
+
 ## Disclaimer
 
 This is for educational purposes only. Trading on prediction markets involves risk. Do your own research before trading.

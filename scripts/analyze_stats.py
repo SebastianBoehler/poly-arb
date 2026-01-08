@@ -33,6 +33,8 @@ from plots import (
     plot_duration_by_threshold,
     plot_duration_timeline,
     plot_duration_distribution,
+    plot_duration_by_expiry,
+    plot_duration_by_expiry_lines,
 )
 from plots.common import threshold_cols, avg_yes_cols, avg_no_cols
 
@@ -68,6 +70,13 @@ def load_duration(csv_path: Path) -> pd.DataFrame:
     for col in ["p90_ms", "med_ms", "rolling_p90_ms"]:
         if col not in df.columns:
             df[col] = pd.NA
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df
+
+
+def load_duration_expiry(csv_path: Path) -> pd.DataFrame:
+    """Load duration-by-expiry CSV data."""
+    df = pd.read_csv(csv_path, on_bad_lines="skip", engine="python")
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
 
@@ -286,6 +295,45 @@ def load_duration_symbol(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
+
+
+def print_duration_expiry_summary(df: pd.DataFrame) -> None:
+    """Print summary of opportunity duration by time-to-expiry bucket."""
+    if df.empty:
+        print("\nNo duration-by-expiry data available.")
+        return
+
+    print("\n" + "=" * 70)
+    print("OPPORTUNITY DURATION BY TIME-TO-EXPIRY")
+    print("=" * 70)
+    print("Shows how opportunity duration varies with market age (time until expiry)")
+
+    # Get latest snapshot per threshold/bucket
+    latest = df.sort_values("timestamp").groupby(["threshold", "expiry_bucket"]).tail(1)
+
+    # Define bucket order (from far to near expiry)
+    bucket_order = ["60+m", "15-60m", "5-15m", "60-300s", "30-60s", "15-30s", "5-15s", "0-5s"]
+
+    for th in sorted(latest["threshold"].unique()):
+        th_data = latest[latest["threshold"] == th]
+        if th_data.empty:
+            continue
+
+        print(f"\n--- Threshold ≤{th} ---")
+        print(f"{'Bucket':<12} {'Avg (ms)':<12} {'Min (ms)':<12} {'Max (ms)':<12} {'Count':<10}")
+        print("-" * 58)
+
+        for bucket in bucket_order:
+            row = th_data[th_data["expiry_bucket"] == bucket]
+            if row.empty:
+                continue
+            r = row.iloc[0]
+            print(f"{bucket:<12} {r['avg_ms']:<12.0f} {r['min_ms']:<12.0f} {r['max_ms']:<12.0f} {int(r['count']):<10}")
+
+    # Key insight
+    print("\nKey Insight:")
+    print("  • Longer durations early in market life = more time to execute")
+    print("  • Shorter durations near expiry = need faster execution")
 
 
 def load_momentum(csv_path: Path) -> pd.DataFrame:
@@ -714,6 +762,17 @@ def main() -> None:
         print_duration_symbol_summary(duration_symbol_df)
     else:
         print(f"\nNo per-symbol duration CSV found at {duration_symbol_csv}")
+
+    # Load duration-by-expiry data if available
+    duration_expiry_csv = Path(str(args.csv).replace(".csv", "-duration-expiry.csv"))
+    duration_expiry_df = pd.DataFrame()
+    if duration_expiry_csv.exists():
+        duration_expiry_df = load_duration_expiry(duration_expiry_csv)
+        print_duration_expiry_summary(duration_expiry_df)
+        plot_duration_by_expiry(duration_expiry_df, args.out_dir)
+        plot_duration_by_expiry_lines(duration_expiry_df, args.out_dir)
+    else:
+        print(f"\nNo duration-expiry CSV found at {duration_expiry_csv}")
 
     # Print comprehensive opportunity evaluation
     print_opportunity_evaluation(all_rows, buckets_df, liquidity_df, duration_df)

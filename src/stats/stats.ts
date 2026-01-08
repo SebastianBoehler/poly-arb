@@ -26,7 +26,15 @@ import type {
   OrderbookLevel,
   HighPriceExpiryHits,
 } from "../core/types";
-import { bumpThresholdHits, bumpThresholdPriceSums, getExpiryBucket, bumpTimeToExpiryHits, bumpHighPriceExpiryHits, FINE_EXPIRY_BUCKETS } from "./utils";
+import {
+  bumpThresholdHits,
+  bumpThresholdPriceSums,
+  getExpiryBucket,
+  getFineExpiryBucket,
+  bumpTimeToExpiryHits,
+  bumpHighPriceExpiryHits,
+  FINE_EXPIRY_BUCKETS,
+} from "./utils";
 import { getMarketExpiry, formatExpiry, extractSymbol } from "../core/utils";
 
 const durationSampleCap = 1000; // keep last N durations per threshold for rolling stats
@@ -47,6 +55,24 @@ let overallLiquidity: ThresholdLiquidity = {};
 let overallDuration: ThresholdDuration = {};
 let highPriceExpiryYes: HighPriceExpiryHits = {};
 let highPriceExpiryNo: HighPriceExpiryHits = {};
+
+// Duration by time-to-expiry: tracks how opportunity duration varies with market age
+// Key: threshold -> expiryBucket -> { sumMs, count, maxMs, minMs }
+type DurationByExpiry = Record<number, Record<string, { sumMs: number; count: number; maxMs: number; minMs: number }>>;
+let durationByExpiry: DurationByExpiry = {};
+
+function recordDurationByExpiry(th: number, expiresAt: number, durationMs: number) {
+  const bucket = getFineExpiryBucket(expiresAt);
+  if (!durationByExpiry[th]) durationByExpiry[th] = {};
+  if (!durationByExpiry[th][bucket]) {
+    durationByExpiry[th][bucket] = { sumMs: 0, count: 0, maxMs: 0, minMs: Number.POSITIVE_INFINITY };
+  }
+  const b = durationByExpiry[th][bucket];
+  b.sumMs += durationMs;
+  b.count += 1;
+  b.maxMs = Math.max(b.maxMs, durationMs);
+  b.minMs = Math.min(b.minMs, durationMs);
+}
 // Per-market duration stats
 function ensureOverallDuration(th: number): Required<ThresholdDuration>[number] {
   if (!overallDuration[th]) {
@@ -776,6 +802,7 @@ function printSummary(
     writeMomentumCsv(csvPath.replace(".csv", "-momentum.csv"), new Date().toISOString());
     writeDurationPerSymbolCsv(csvPath.replace(".csv", "-duration-symbol.csv"), new Date().toISOString(), trackers);
     writeSpotLagCsv(csvPath.replace(".csv", "-spotlag.csv"), new Date().toISOString());
+    writeDurationByExpiryCsv(csvPath.replace(".csv", "-duration-expiry.csv"), new Date().toISOString());
   }
 
   lastPrintSamples = totalCombinedSamples;
@@ -911,6 +938,9 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
         if (mktDur.samples.length > durationSampleCap) {
           mktDur.samples.shift();
         }
+
+        // Track duration by time-to-expiry bucket
+        recordDurationByExpiry(th, entry.market.expiresAt, durationMs);
       }
       // If still active (isOpportunity && wasActive), keep tracking
     }
@@ -1188,6 +1218,28 @@ function writeSpotLagCsv(path: string, ts: string) {
 
   // Clear events after writing to avoid duplicates
   spotLagEvents = [];
+}
+
+function writeDurationByExpiryCsv(path: string, ts: string) {
+  // Duration by time-to-expiry CSV: shows how opportunity duration varies with market age
+  const header = ["timestamp", "threshold", "expiry_bucket", "avg_ms", "min_ms", "max_ms", "count"].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  let buf = "";
+  for (const th of thresholds) {
+    const buckets = durationByExpiry[th];
+    if (!buckets) continue;
+    for (const bucket of FINE_EXPIRY_BUCKETS) {
+      const data = buckets[bucket];
+      if (!data || data.count === 0) continue;
+      const avgMs = (data.sumMs / data.count).toFixed(0);
+      const minMs = data.minMs === Number.POSITIVE_INFINITY ? "0" : data.minMs.toFixed(0);
+      buf += [ts, th.toString(), bucket, avgMs, minMs, data.maxMs.toFixed(0), data.count.toString()].join(",") + "\n";
+    }
+  }
+  appendFileSync(path, buf, { encoding: "utf8" });
 }
 
 main();
