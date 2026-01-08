@@ -1,20 +1,24 @@
 /**
  * Dead-outcome probe strategy.
  *
- * Tracks when a single leg trades at dust prices (1-5c) and logs how often
- * it appears before expiry. Intended to evaluate the "stress tape" idea.
+ * Tracks when a single leg trades at dust prices (1-5c), logs threshold
+ * crossings, and records the eventual outcome to estimate win rates.
+ * Intended to evaluate the "stress tape" idea.
  *
  * Run: bun run src/strategies/dead-outcome.ts
  *
  * Env:
  *   SYMBOL=btc
- *   TIMEFRAME=15m           // 15m | 1h | 4h
+ *   TIMEFRAME=15m           // 15m | 1h | 4h (crypto mode only)
+ *   MARKET_SOURCE=crypto    // crypto | neg_risk
+ *   MARKET_QUERY=           // substring to filter slug/title (neg_risk only)
+ *   MAX_MARKETS=100         // neg_risk only
  *   LOW_PRICE_THRESHOLDS=0.01,0.02,0.03,0.05
  *   REFRESH_MS=1500
  *   RECHECK_MS=10000
  */
 import { ConnectionStatus, RealTimeDataClient } from "@polymarket/real-time-data-client";
-import { fetchCrypto15mMarkets, fetchCrypto1hMarkets, fetchCrypto4hMarkets } from "../core/gamma";
+import { fetchCrypto15mMarkets, fetchCrypto1hMarkets, fetchCrypto4hMarkets, fetchNegRiskMarkets } from "../core/gamma";
 import { formatExpiry, getMarketExpiry } from "../core/utils";
 import type { MarketState } from "../core/types";
 
@@ -28,6 +32,9 @@ type AggOrderBook = {
 
 const SYMBOL = (process.env.SYMBOL ?? "btc").toLowerCase();
 const TIMEFRAME = (process.env.TIMEFRAME ?? "15m").toLowerCase();
+const MARKET_SOURCE = (process.env.MARKET_SOURCE ?? "crypto").toLowerCase();
+const MARKET_QUERY = (process.env.MARKET_QUERY ?? "").toLowerCase();
+const MAX_MARKETS = Number(process.env.MAX_MARKETS ?? "100");
 const REFRESH_MS = Number(process.env.REFRESH_MS ?? "1500");
 const RECHECK_MS = Number(process.env.RECHECK_MS ?? "10000");
 const LOW_PRICE_THRESHOLDS = (process.env.LOW_PRICE_THRESHOLDS ?? "0.01,0.02,0.03,0.05")
@@ -35,6 +42,7 @@ const LOW_PRICE_THRESHOLDS = (process.env.LOW_PRICE_THRESHOLDS ?? "0.01,0.02,0.0
   .map((t) => Number(t.trim()))
   .filter((t) => !Number.isNaN(t))
   .sort((a, b) => a - b);
+const DATA_API = "https://data-api.polymarket.com";
 
 let activeMarket: MarketState | null = null;
 let activeExpiryMs = 0;
@@ -43,6 +51,20 @@ let client: RealTimeDataClient | null = null;
 let connected = false;
 const latestBook = new Map<string, AggOrderBook>();
 const lastThresholdIndex: Record<"yes" | "no", number> = { yes: -1, no: -1 };
+
+type DustEvent = {
+  side: "yes" | "no";
+  threshold: number;
+  price: number;
+  size: number;
+  ts: number;
+};
+
+const dustEventsByMarket = new Map<string, DustEvent[]>();
+let dustEventCount = 0;
+let dustWinCount = 0;
+const dustWinByThreshold = new Map<number, { wins: number; total: number }>();
+const pendingOutcomeMarkets = new Map<string, MarketState>();
 
 function getBestAsk(levels?: { price: string; size: string }[]): { price: number; size: number } | null {
   if (!levels || levels.length === 0) return null;
@@ -73,7 +95,17 @@ function pickSymbolMarket(markets: MarketState[], timeframe: string): MarketStat
   return withExpiry.length ? withExpiry[0].market : null;
 }
 
+function pickNegRiskMarket(markets: MarketState[]): MarketState | null {
+  const filtered = MARKET_QUERY
+    ? markets.filter((m) => m.slug.toLowerCase().includes(MARKET_QUERY) || m.title.toLowerCase().includes(MARKET_QUERY))
+    : markets;
+  return filtered.length ? filtered[0] : null;
+}
+
 async function loadMarkets(): Promise<MarketState[]> {
+  if (MARKET_SOURCE === "neg_risk") {
+    return fetchNegRiskMarkets(MAX_MARKETS);
+  }
   if (TIMEFRAME === "1h") return fetchCrypto1hMarkets();
   if (TIMEFRAME === "4h") return fetchCrypto4hMarkets();
   return fetchCrypto15mMarkets();
@@ -81,17 +113,28 @@ async function loadMarkets(): Promise<MarketState[]> {
 
 async function loadActiveMarket(): Promise<void> {
   const markets = await loadMarkets();
-  const chosen = pickSymbolMarket(markets, TIMEFRAME);
+  const chosen = MARKET_SOURCE === "neg_risk" ? pickNegRiskMarket(markets) : pickSymbolMarket(markets, TIMEFRAME);
   if (!chosen) {
+    if (MARKET_SOURCE === "neg_risk") {
+      throw new Error("No active neg_risk market found for query");
+    }
     throw new Error(`No active ${SYMBOL.toUpperCase()} ${TIMEFRAME} market found`);
   }
   activeMarket = chosen;
   activeTokens = [chosen.tokenYes, chosen.tokenNo];
-  activeExpiryMs = getMarketExpiry(chosen.slug, TIMEFRAME);
-  console.log(`Tracking ${SYMBOL.toUpperCase()} market: ${chosen.slug}`);
+  activeExpiryMs = MARKET_SOURCE === "neg_risk" ? Number.POSITIVE_INFINITY : getMarketExpiry(chosen.slug, TIMEFRAME);
+  console.log(
+    MARKET_SOURCE === "neg_risk"
+      ? `Tracking market: ${chosen.slug}`
+      : `Tracking ${SYMBOL.toUpperCase()} market: ${chosen.slug}`
+  );
   console.log(`  YES token: ${chosen.tokenYes}`);
   console.log(`  NO  token: ${chosen.tokenNo}`);
-  console.log(`  Expires:   ${formatExpiry(activeExpiryMs)} UTC\n`);
+  if (MARKET_SOURCE !== "neg_risk") {
+    console.log(`  Expires:   ${formatExpiry(activeExpiryMs)} UTC\n`);
+  } else {
+    console.log("");
+  }
   lastThresholdIndex.yes = -1;
   lastThresholdIndex.no = -1;
 }
@@ -112,12 +155,96 @@ function logThresholdCrossing(side: "yes" | "no", price: number, size: number): 
   }
   const threshold = LOW_PRICE_THRESHOLDS[idx];
   const multiple = price > 0 ? (1 / price).toFixed(1) : "∞";
+  if (activeMarket) {
+    const key = activeMarket.conditionId;
+    const events = dustEventsByMarket.get(key) ?? [];
+    events.push({ side, threshold, price, size, ts: Date.now() });
+    dustEventsByMarket.set(key, events);
+    dustEventCount += 1;
+    const bucket = dustWinByThreshold.get(threshold) ?? { wins: 0, total: 0 };
+    bucket.total += 1;
+    dustWinByThreshold.set(threshold, bucket);
+  }
   console.log(
     `[DUST ${side.toUpperCase()}] price=${price.toFixed(4)} size=${size.toFixed(2)} threshold<=${threshold.toFixed(
       2
     )}x payout=${multiple}x`
   );
   lastThresholdIndex[side] = idx;
+}
+
+function normalizeOutcome(raw: string | null): "yes" | "no" | null {
+  if (!raw) return null;
+  const value = raw.toLowerCase();
+  if (value === "yes" || value === "up") return "yes";
+  if (value === "no" || value === "down") return "no";
+  return null;
+}
+
+async function fetchMarketOutcome(conditionId: string): Promise<"yes" | "no" | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const url = `${DATA_API}/markets?condition_id=${conditionId}`;
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) {
+      console.warn(`[Outcome] Failed to fetch market outcome (${response.status})`);
+      return null;
+    }
+    const data = (await response.json()) as Array<Record<string, any>>;
+    const market = data?.[0];
+    if (!market) return null;
+    const resolved = market.resolved ?? market.closed ?? market.isResolved ?? false;
+    const outcome = normalizeOutcome(market.outcome || market.result || market.resolution || market.resolved_outcome);
+    if (!resolved && !outcome) return null;
+    return outcome;
+  } catch (error: any) {
+    if (error.name !== "AbortError") {
+      console.warn("[Outcome] Error fetching outcome:", error?.message || error);
+    }
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function finalizeMarket(market: MarketState): Promise<void> {
+  const events = dustEventsByMarket.get(market.conditionId);
+  if (!events || events.length === 0) return;
+  const outcome = await fetchMarketOutcome(market.conditionId);
+  if (!outcome) {
+    console.log(`[Outcome] Market ${market.slug} not resolved yet. Will retry later.`);
+    pendingOutcomeMarkets.set(market.conditionId, market);
+    return;
+  }
+  let wins = 0;
+  for (const event of events) {
+    if (event.side === outcome) {
+      wins += 1;
+      dustWinCount += 1;
+      const bucket = dustWinByThreshold.get(event.threshold) ?? { wins: 0, total: 0 };
+      bucket.wins += 1;
+      dustWinByThreshold.set(event.threshold, bucket);
+    }
+  }
+  const winRate = events.length > 0 ? (wins / events.length) * 100 : 0;
+  const overallRate = dustEventCount > 0 ? (dustWinCount / dustEventCount) * 100 : 0;
+  console.log(
+    `[Outcome] ${market.slug} resolved=${outcome.toUpperCase()} | dust wins ${wins}/${events.length} (${winRate.toFixed(
+      1
+    )}%) | overall ${dustWinCount}/${dustEventCount} (${overallRate.toFixed(1)}%)`
+  );
+  dustEventsByMarket.delete(market.conditionId);
+  pendingOutcomeMarkets.delete(market.conditionId);
+}
+
+async function retryPendingOutcomes(): Promise<void> {
+  if (pendingOutcomeMarkets.size === 0) return;
+  const pending = Array.from(pendingOutcomeMarkets.values());
+  for (const market of pending) {
+    await finalizeMarket(market);
+  }
 }
 
 function logSnapshot(): void {
@@ -181,10 +308,33 @@ async function restartClient(): Promise<void> {
 
 async function ensureActiveMarket(): Promise<void> {
   const now = Date.now();
+  if (MARKET_SOURCE === "neg_risk") {
+    await retryPendingOutcomes();
+    const markets = await loadMarkets();
+    const stillActive = activeMarket && markets.some((m) => m.conditionId === activeMarket.conditionId);
+    if (activeMarket && !stillActive) {
+      console.log("\nMarket closed or missing. Resolving outcome and rotating...");
+      await finalizeMarket(activeMarket);
+      activeMarket = null;
+    }
+    if (!activeMarket) {
+      await loadActiveMarket();
+      latestBook.clear();
+      await restartClient();
+    }
+    return;
+  }
+
   const needsRefresh = !activeMarket || now >= activeExpiryMs;
   if (!needsRefresh) return;
 
-  console.log("\nMarket expired or missing. Fetching next market...");
+  if (activeMarket) {
+    console.log("\nMarket expired. Resolving outcome...");
+    await finalizeMarket(activeMarket);
+  }
+
+  console.log("Fetching next market...");
+  await retryPendingOutcomes();
   await loadActiveMarket();
   latestBook.clear();
   await restartClient();
@@ -192,7 +342,11 @@ async function ensureActiveMarket(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log("=== DEAD-OUTCOME PROBE (orderbook only) ===");
-  console.log(`Symbol: ${SYMBOL.toUpperCase()} | Timeframe: ${TIMEFRAME}`);
+  console.log(
+    MARKET_SOURCE === "neg_risk"
+      ? `Market source: neg_risk | Query: ${MARKET_QUERY || "none"}`
+      : `Symbol: ${SYMBOL.toUpperCase()} | Timeframe: ${TIMEFRAME}`
+  );
   console.log(`Low price thresholds: ${LOW_PRICE_THRESHOLDS.join(", ")}`);
   console.log("");
 
