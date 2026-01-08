@@ -6,6 +6,7 @@ from .frequency import plot_opportunity_frequency, plot_opportunity_timeline
 from .time_buckets import plot_time_bucket_distribution, plot_time_bucket_heatmap
 from .liquidity import plot_liquidity_by_threshold, plot_liquidity_timeline
 from .duration import plot_duration_by_threshold, plot_duration_timeline, plot_duration_distribution, plot_duration_by_expiry, plot_duration_by_expiry_lines
+from .lowprice import plot_lowprice_heatmap
 
 __all__ = [
     'setup_deepseek_style',
@@ -27,4 +28,5 @@ __all__ = [
     'plot_duration_distribution',
     'plot_duration_by_expiry',
     'plot_duration_by_expiry_lines',
+    'plot_lowprice_heatmap',
 ]

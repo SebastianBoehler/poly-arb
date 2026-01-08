@@ -1,4 +1,4 @@
-import type { HighPriceExpiryHits, ThresholdPriceSums, TimeToExpiryHits } from "../core/types";
+import type { HighPriceExpiryHits, LowPriceExpiryHits, ThresholdPriceSums, TimeToExpiryHits } from "../core/types";
 
 // Time-to-expiry buckets in minutes
 export const EXPIRY_BUCKETS = ["0-5", "5-10", "10-15", "15-30", "30-60", "60+"] as const;
@@ -80,6 +80,18 @@ export function bumpHighPriceExpiryHits(bestAsk: number, expiresAt: number, thre
     if (!hits[t]) hits[t] = {};
     if (!hits[t][bucket]) hits[t][bucket] = 0;
     if (bestAsk >= t) {
+      hits[t][bucket] += 1;
+    }
+  }
+  return hits;
+}
+
+export function bumpLowPriceExpiryHits(bestAsk: number, expiresAt: number, thresholds: number[], hits: LowPriceExpiryHits): LowPriceExpiryHits {
+  const bucket = getFineExpiryBucket(expiresAt);
+  for (const t of thresholds) {
+    if (!hits[t]) hits[t] = {};
+    if (!hits[t][bucket]) hits[t][bucket] = 0;
+    if (bestAsk <= t) {
       hits[t][bucket] += 1;
     }
   }

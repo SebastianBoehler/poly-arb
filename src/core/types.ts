@@ -77,6 +77,7 @@ export type ThresholdLiquidity = Record<number, { sumUsd: number; count: number;
 
 // Tracks how often a single-leg ask breaches high price near expiry, bucketed by time-to-expiry
 export type HighPriceExpiryHits = Record<number, Record<string, number>>; // threshold -> bucket -> count
+export type LowPriceExpiryHits = Record<number, Record<string, number>>; // threshold -> bucket -> count
 
 // Momentum tracking: detect rapid price moves (spot-lag exploitation)
 export interface MomentumEvent {

@@ -10,6 +10,8 @@
  *  - STATS_REFRESH_MINUTES: refresh markets periodically (minutes, default 10; 0 = off)
  *  - STATS_OUT_CSV: path to append summary CSV (default: stats-summary.csv)
  *  - STATS_TIMEFRAMES: comma-separated timeframes to track (default: "15m,1h,4h")
+ *  - STATS_LOW_PRICE_THRESHOLDS: comma-separated low-price thresholds for dust (default: "0.01,0.02,0.03,0.05")
+ *  - STATS_HIGH_PRICE_THRESHOLDS: comma-separated high-price thresholds (default: "0.95,0.97,0.99")
  */
 import { RealTimeDataClient, ConnectionStatus } from "@polymarket/real-time-data-client";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "fs";
@@ -25,6 +27,7 @@ import type {
   ThresholdDuration,
   OrderbookLevel,
   HighPriceExpiryHits,
+  LowPriceExpiryHits,
 } from "../core/types";
 import {
   bumpThresholdHits,
@@ -33,6 +36,7 @@ import {
   getFineExpiryBucket,
   bumpTimeToExpiryHits,
   bumpHighPriceExpiryHits,
+  bumpLowPriceExpiryHits,
   FINE_EXPIRY_BUCKETS,
 } from "./utils";
 import { getMarketExpiry, formatExpiry, extractSymbol } from "../core/utils";
@@ -55,6 +59,8 @@ let overallLiquidity: ThresholdLiquidity = {};
 let overallDuration: ThresholdDuration = {};
 let highPriceExpiryYes: HighPriceExpiryHits = {};
 let highPriceExpiryNo: HighPriceExpiryHits = {};
+let lowPriceExpiryYes: LowPriceExpiryHits = {};
+let lowPriceExpiryNo: LowPriceExpiryHits = {};
 
 // Duration by time-to-expiry: tracks how opportunity duration varies with market age
 // Key: threshold -> expiryBucket -> { sumMs, count, maxMs, minMs }
@@ -317,6 +323,11 @@ const refreshMinutes = Number.isFinite(Number(refreshMinutesRaw)) && Number(refr
 const outCsvPath = process.env.STATS_OUT_CSV || "stats-summary.csv";
 const timeframes = (process.env.STATS_TIMEFRAMES || "15m").split(",").map((t) => t.trim());
 const highPriceThresholds = (process.env.STATS_HIGH_PRICE_THRESHOLDS || "0.95,0.97,0.99")
+  .split(",")
+  .map((t) => Number(t.trim()))
+  .filter((t) => !Number.isNaN(t))
+  .sort((a, b) => a - b);
+const lowPriceThresholds = (process.env.STATS_LOW_PRICE_THRESHOLDS || "0.01,0.02,0.03,0.05")
   .split(",")
   .map((t) => Number(t.trim()))
   .filter((t) => !Number.isNaN(t))
@@ -799,6 +810,7 @@ function printSummary(
     const symbolStats = aggregateSymbolStats(trackers);
     writeCsvSummary(csvPath, totalCombinedSamples, overallHits, overallPriceSums, symbolStats);
     writeHighPriceCsv(csvPath.replace(".csv", "-nearprice.csv"), new Date().toISOString());
+    writeLowPriceCsv(csvPath.replace(".csv", "-lowprice.csv"), new Date().toISOString());
     writeMomentumCsv(csvPath.replace(".csv", "-momentum.csv"), new Date().toISOString());
     writeDurationPerSymbolCsv(csvPath.replace(".csv", "-duration-symbol.csv"), new Date().toISOString(), trackers);
     writeSpotLagCsv(csvPath.replace(".csv", "-spotlag.csv"), new Date().toISOString());
@@ -898,6 +910,9 @@ function applyBestAskWithLiquidity(entry: { market: StatsMarketTracker; side: "y
     // Track near-expiry high pricing per leg
     bumpHighPriceExpiryHits(bestAskYes, entry.market.expiresAt, highPriceThresholds, highPriceExpiryYes);
     bumpHighPriceExpiryHits(bestAskNo, entry.market.expiresAt, highPriceThresholds, highPriceExpiryNo);
+    // Track near-expiry low pricing per leg (dust opportunities)
+    bumpLowPriceExpiryHits(bestAskYes, entry.market.expiresAt, lowPriceThresholds, lowPriceExpiryYes);
+    bumpLowPriceExpiryHits(bestAskNo, entry.market.expiresAt, lowPriceThresholds, lowPriceExpiryNo);
 
     // Track momentum (spot-lag): detect rapid price moves from <0.5 to >0.8/0.9/0.95
     trackMomentum(entry, bestAsk, now);
@@ -1046,6 +1061,37 @@ function writeHighPriceCsv(path: string, ts: string) {
   let buf = "";
   for (const [side, hits] of sides) {
     for (const th of highPriceThresholds) {
+      const buckets = hits[th];
+      if (!buckets) continue;
+      const total = Object.values(buckets).reduce((a, b) => a + b, 0);
+      if (total === 0) continue;
+      const hitValues = FINE_EXPIRY_BUCKETS.map((b) => (buckets[b] || 0).toString());
+      const pctValues = FINE_EXPIRY_BUCKETS.map((b) => {
+        const count = buckets[b] || 0;
+        return total > 0 ? ((count / total) * 100).toFixed(2) : "0";
+      });
+      buf += [ts, side, th.toString(), ...hitValues, ...pctValues].join(",") + "\n";
+    }
+  }
+
+  appendFileSync(path, buf, { encoding: "utf8" });
+}
+
+function writeLowPriceCsv(path: string, ts: string) {
+  const header =
+    ["timestamp", "side", "threshold", ...FINE_EXPIRY_BUCKETS.map((b) => `hits_${b}`), ...FINE_EXPIRY_BUCKETS.map((b) => `pct_${b}`)].join(",") + "\n";
+  if (!existsSync(path)) {
+    writeFileSync(path, header, { encoding: "utf8" });
+  }
+
+  const sides: ["yes" | "no", LowPriceExpiryHits][] = [
+    ["yes", lowPriceExpiryYes],
+    ["no", lowPriceExpiryNo],
+  ];
+
+  let buf = "";
+  for (const [side, hits] of sides) {
+    for (const th of lowPriceThresholds) {
       const buckets = hits[th];
       if (!buckets) continue;
       const total = Object.values(buckets).reduce((a, b) => a + b, 0);
