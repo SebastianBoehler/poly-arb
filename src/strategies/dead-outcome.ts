@@ -311,7 +311,8 @@ async function ensureActiveMarket(): Promise<void> {
   if (MARKET_SOURCE === "neg_risk") {
     await retryPendingOutcomes();
     const markets = await loadMarkets();
-    const stillActive = activeMarket && markets.some((m) => m.conditionId === activeMarket.conditionId);
+    const activeConditionId = activeMarket?.conditionId;
+    const stillActive = activeConditionId ? markets.some((m) => m.conditionId === activeConditionId) : false;
     if (activeMarket && !stillActive) {
       console.log("\nMarket closed or missing. Resolving outcome and rotating...");
       await finalizeMarket(activeMarket);

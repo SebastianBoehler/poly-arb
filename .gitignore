@@ -11,3 +11,7 @@ coverage/
 build/
 *.pyc
 notes.md
+data/
+market-plots/
+opportunities.csv
+category-stats.csv
