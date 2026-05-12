@@ -51,6 +51,42 @@ make -j$(nproc)
 ./polymarket_arb --neg-risk --max 100 --trigger 0.97
 ```
 
+## Keep the C++ Client Fresh
+
+`cpp/CMakeLists.txt` fetches `SebastianBoehler/polymarket-cpp-client` from `main` by default. Run this from the repo root before live or benchmark runs to clear the cached FetchContent checkout, reconfigure, and rebuild the key C++ binaries:
+
+```bash
+bun run cpp:update-client
+```
+
+Pin a known client version when you need reproducible tests:
+
+```bash
+POLYMARKET_CLIENT_GIT_TAG=<commit-or-tag> bun run cpp:update-client
+```
+
+## Discovery Mode
+
+`discovery_mode` is a C++ live scanner for non-execution research. It fetches markets, snapshots YES/NO books, evaluates example strategies, and prints JSONL events with paper-trade projections.
+
+```bash
+cmake --build build --target discovery_mode
+
+# General neg-risk smoke scan
+./build/discovery_mode --max 50 --iterations 1
+
+# 15m crypto scan, append findings to JSONL until Ctrl+C/SIGTERM
+./build/discovery_mode --15m --max 25 --interval-ms 1000 --out ../data/discovery.jsonl
+
+# Bounded overnight-style collection by wall-clock duration
+./build/discovery_mode --15m --duration-hours 8 --interval-ms 30000 --out ../data/discovery-overnight.jsonl
+```
+
+Current example signals:
+
+- `binary_arbitrage`: YES ask + NO ask is below the configured threshold with enough top-of-book depth.
+- `market_making_candidate`: YES book spread and visible depth are large enough to investigate maker quotes.
+
 ## Options
 
 | Option         | Description                                      |

@@ -12,7 +12,8 @@ This bot monitors binary markets on Polymarket and executes arbitrage opportunit
 ### Architecture
 
 - **C++ (core)**: Order signing, WebSocket streaming, batch order placement, arbitrage detection
-- **TypeScript (auxiliary)**: Position redemption/merging, stats collection, market analysis
+- **C++ discovery**: Live market scans, paper-trade projections, strategy signal JSONL
+- **TypeScript (auxiliary)**: Position redemption/merging, stats collection, wallet/copy-trade research
 
 ## Strategy
 
@@ -80,6 +81,20 @@ The C++ implementation provides significant performance advantages for latency-c
 | **Total time** | 50.7 ms | 147.2 ms   | **2.9x**  |
 
 The C++ client uses native secp256k1 cryptography and caches `neg_risk` per market to minimize API calls.
+
+## Client Freshness
+
+The C++ build consumes `polymarket-cpp-client` through CMake `FetchContent` with `POLYMARKET_CLIENT_GIT_TAG=main` by default. Reconfigure before latency-sensitive runs so the generated `_deps` checkout is refreshed:
+
+```bash
+bun run cpp:update-client
+```
+
+For reproducible testing, pin a ref:
+
+```bash
+POLYMARKET_CLIENT_GIT_TAG=<commit-or-tag> bun run cpp:update-client
+```
 
 ## Project Structure
 
@@ -155,6 +170,15 @@ TRIGGER_COMBINED=0.995 SIZE_USDC=5 DRY_RUN=true ./cpp/build/arb_test
 
 # Run order benchmark
 ./cpp/build/order_benchmark
+
+# Scan markets and emit strategy/paper-trade signals as JSONL
+bun run discovery:cpp
+
+# Crypto 15m discovery, runs until Ctrl+C/SIGTERM
+./cpp/build/discovery_mode --15m --max 25 --interval-ms 1000 --out data/discovery.jsonl
+
+# Bounded collection by wall-clock duration
+./cpp/build/discovery_mode --15m --duration-hours 8 --interval-ms 30000 --out data/discovery-overnight.jsonl
 ```
 
 ### TypeScript Tools

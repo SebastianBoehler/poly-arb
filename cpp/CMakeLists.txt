@@ -20,6 +20,7 @@ option(ENABLE_PGO_GENERATE "Build with PGO instrumentation (profile generation)"
 option(ENABLE_PGO_USE "Build using PGO profile data" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer (Debug/RelWithDebInfo)" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (Debug/RelWithDebInfo)" OFF)
+option(POLY_ARB_BUILD_TESTS "Build poly-arb C++ unit tests" ON)
 
 # Compiler flags for performance
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
@@ -67,19 +68,53 @@ if(ENABLE_UBSAN AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 # Fetch dependencies
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
+
+if(NOT TARGET OpenSSL::SSL)
+    add_library(OpenSSL::SSL UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(OpenSSL::SSL PROPERTIES
+        IMPORTED_LOCATION "${OPENSSL_SSL_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${OPENSSL_INCLUDE_DIR}")
+endif()
+
+if(NOT TARGET OpenSSL::Crypto)
+    add_library(OpenSSL::Crypto UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(OpenSSL::Crypto PROPERTIES
+        IMPORTED_LOCATION "${OPENSSL_CRYPTO_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${OPENSSL_INCLUDE_DIR}")
+endif()
+
 include(FetchContent)
 
-# Polymarket C++ Client library
+# Polymarket C++ Client library. Defaulting to main keeps execution code on
+# the newest client; override POLYMARKET_CLIENT_GIT_TAG for reproducible builds.
+set(POLYMARKET_CLIENT_GIT_TAG "main" CACHE STRING "Git ref for polymarket-cpp-client")
+set(FETCHCONTENT_UPDATES_DISCONNECTED_POLYMARKET_CLIENT OFF CACHE BOOL
+    "Always check for polymarket-cpp-client updates during configure" FORCE)
 set(POLYMARKET_CLIENT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(POLYMARKET_CLIENT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     polymarket_client
     GIT_REPOSITORY https://github.com/SebastianBoehler/polymarket-cpp-client.git
-    GIT_TAG main
+    GIT_TAG ${POLYMARKET_CLIENT_GIT_TAG}
+    GIT_PROGRESS TRUE
 )
 FetchContent_MakeAvailable(polymarket_client)
 
 # Strategy executables - all link against polymarket::client
+
+add_library(polyarb_strategies
+    src/discovery_options.cpp
+    src/example_strategies.cpp
+    src/slippage.cpp
+)
+target_include_directories(polyarb_strategies PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(polyarb_strategies PUBLIC polymarket::client)
+
+add_executable(discovery_mode src/discovery_mode.cpp)
+target_link_libraries(discovery_mode PRIVATE polyarb_strategies)
 
 # Main arbitrage bot
 add_executable(polymarket_arb src/main.cpp)
@@ -119,3 +154,11 @@ target_link_libraries(avg_in_test PRIVATE polymarket::client)
 
 # Install
 install(TARGETS polymarket_arb DESTINATION bin)
+
+if(POLY_ARB_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(example_strategies_test tests/example_strategies_test.cpp)
+    target_link_libraries(example_strategies_test PRIVATE polyarb_strategies)
+    add_test(NAME example_strategies_test COMMAND example_strategies_test)
+endif()
