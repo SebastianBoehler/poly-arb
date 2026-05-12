@@ -86,6 +86,11 @@ BinaryBundleSimulation simulate_binary_bundle_buy(
 {
     BinaryBundleSimulation result;
     result.requested_bundles = std::max(0.0, target_bundles);
+    if (result.requested_bundles <= 0.0)
+    {
+        return result;
+    }
+
     result.yes = simulate_buy_shares(yes_asks, result.requested_bundles);
     result.no = simulate_buy_shares(no_asks, result.requested_bundles);
     result.fillable = result.yes.fillable && result.no.fillable;

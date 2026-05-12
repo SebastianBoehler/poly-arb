@@ -92,6 +92,10 @@ int main()
     require(!unfillable_bundle.fillable, "expected thin bundle to be unfillable");
     require(unfillable_bundle.edge_cents <= 0.0, "expected unfillable bundle to avoid positive edge");
 
+    const auto zero_bundle = polyarb::simulate_binary_bundle_buy(thin_yes, thin_no, 0.0);
+    require(!zero_bundle.fillable, "expected zero-size bundle to be ignored");
+    require(zero_bundle.edge_cents == 0.0, "expected zero-size bundle to avoid fake edge");
+
     const auto forever = polyarb::parse_discovery_options({"discovery_mode", "--15m", "--max", "18"});
     require(forever.crypto_15m, "expected 15m option");
     require(forever.max_markets == 18, "expected max market option");
@@ -106,6 +110,20 @@ int main()
     const auto started = std::chrono::steady_clock::now();
     require(polyarb::should_continue_discovery(2, started, bounded), "expected bounded run to continue before max iterations");
     require(!polyarb::should_continue_discovery(3, started, bounded), "expected bounded run to stop at max iterations");
+
+    polymarket::ClobMarket closed_market;
+    closed_market.condition_id = "closed";
+    closed_market.active = false;
+    closed_market.closed = true;
+    closed_market.tokens = {{"yes", "Yes"}, {"no", "No"}};
+    require(!polyarb::is_discovery_candidate(closed_market), "expected closed market to be filtered");
+
+    polymarket::ClobMarket active_market;
+    active_market.condition_id = "active";
+    active_market.active = true;
+    active_market.closed = false;
+    active_market.tokens = {{"yes", "Yes"}, {"no", "No"}};
+    require(polyarb::is_discovery_candidate(active_market), "expected active binary market candidate");
 
     return 0;
 }

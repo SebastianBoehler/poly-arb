@@ -47,9 +47,16 @@ std::vector<polymarket::MarketState> fetch_markets(
     }
 
     std::vector<polymarket::MarketState> markets;
-    for (const auto &market : fetcher.fetch_neg_risk_markets(options.max_markets))
+    for (const auto &market : fetcher.fetch_all_markets(options.max_markets * 10))
     {
-        markets.push_back(polymarket::MarketFetcher::to_market_state(market));
+        if (polyarb::is_discovery_candidate(market))
+        {
+            markets.push_back(polymarket::MarketFetcher::to_market_state(market));
+            if (markets.size() >= static_cast<size_t>(options.max_markets))
+            {
+                break;
+            }
+        }
     }
     return markets;
 }

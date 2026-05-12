@@ -116,6 +116,17 @@ bool should_continue_discovery(
     return true;
 }
 
+bool is_discovery_candidate(const polymarket::ClobMarket &market)
+{
+    const bool has_valid_tokens = market.tokens.size() == 2 &&
+                                  !market.token_yes().empty() &&
+                                  !market.token_no().empty();
+    return market.active &&
+           !market.closed &&
+           has_valid_tokens &&
+           !market.condition_id.empty();
+}
+
 std::string discovery_usage()
 {
     return "Usage: discovery_mode [--15m] [--max N] [--iterations N] "

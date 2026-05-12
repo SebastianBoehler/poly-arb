@@ -1,6 +1,7 @@
 #pragma once
 
 #include <example_strategies.hpp>
+#include <types.hpp>
 
 #include <chrono>
 #include <optional>
@@ -28,6 +29,8 @@ bool should_continue_discovery(
     int completed_iterations,
     std::chrono::steady_clock::time_point started_at,
     const DiscoveryOptions &options);
+
+bool is_discovery_candidate(const polymarket::ClobMarket &market);
 
 std::string discovery_usage();
 } // namespace polyarb
