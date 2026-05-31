@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "poly-arb",
+      "name": "polymarket-research-lab",
       "dependencies": {
         "@ethersproject/wallet": "^5.8.0",
         "@polymarket/builder-relayer-client": "^0.0.8",

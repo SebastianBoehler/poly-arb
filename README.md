@@ -1,9 +1,15 @@
-# poly-arb
+# polymarket-research-lab
 
-[![Build](https://github.com/SebastianBoehler/poly-arb/actions/workflows/build.yml/badge.svg)](https://github.com/SebastianBoehler/poly-arb/actions/workflows/build.yml)
+[![Build](https://github.com/SebastianBoehler/polymarket-research-lab/actions/workflows/build.yml/badge.svg)](https://github.com/SebastianBoehler/polymarket-research-lab/actions/workflows/build.yml)
 [![C++ Build](https://github.com/SebastianBoehler/polymarket-cpp-client/actions/workflows/build.yml/badge.svg)](https://github.com/SebastianBoehler/polymarket-cpp-client/actions/workflows/build.yml)
 
-High-performance Polymarket arbitrage bot written in **C++** for low-latency trading.
+Polymarket market analysis + execution toolkit written in **C++** + **TypeScript**.
+
+It combines:
+
+- Low-latency C++ execution engine for live trading.
+- TypeScript research tooling for market discovery and strategy verification.
+- Snapshot collection and post-trade diagnostics.
 
 ## Overview
 
@@ -14,6 +20,45 @@ This bot monitors binary markets on Polymarket and executes arbitrage opportunit
 - **C++ (core)**: Order signing, WebSocket streaming, batch order placement, arbitrage detection
 - **C++ discovery**: Live market scans, paper-trade projections, strategy signal JSONL
 - **TypeScript (auxiliary)**: Position redemption/merging, stats collection, wallet/copy-trade research
+
+## Discovery Focus
+
+This repo is intentionally broader than arb-only:
+
+- Market and signal discovery: `src/scripts/collect-market-data.ts`
+- Strategy sanity checks against historical outcomes: `bun run strategy:nothing-ever-happens -- --csv <path>`
+
+### Verify "nothing ever happens" hypothesis
+
+To test the idea of always taking one side (historically `NO`):
+
+```bash
+bun run strategy:nothing-ever-happens -- \
+  --csv data/all-polymarket-20260514T194748Z/market-snapshots.csv \
+  --side no
+```
+
+Output: markdown summary (`data/nothing-ever-happens-report.md` by default), plus a local
+`data/market-outcome-cache.json` to avoid repeated resolution API fetches.
+
+Per-category breakdown is included automatically (`Category` section). To run only one category:
+
+```bash
+bun run strategy:nothing-ever-happens -- \
+  --csv data/all-polymarket-20260514T194748Z/market-snapshots.csv \
+  --side no \
+  --category Sports
+```
+
+For resolved-market history without a local snapshot CSV, use the Gamma closed-market feed:
+
+```bash
+bun run strategy:nothing-ever-happens:resolved -- \
+  --lookback-hours 336 \
+  --limit 2000
+```
+
+This reports how often resolved binary Yes/No markets ended as `NO`, including category buckets such as sports, crypto, weather, esports, politics, and culture.
 
 ## Strategy
 
@@ -99,7 +144,7 @@ POLYMARKET_CLIENT_GIT_TAG=<commit-or-tag> bun run cpp:update-client
 ## Project Structure
 
 ```
-poly-arb/
+polymarket-research-lab/
 ├── cpp/                         # C++ trading core (main)
 │   ├── src/
 │   │   ├── arb_test.cpp         # Arbitrage detector with WebSocket
@@ -116,7 +161,9 @@ poly-arb/
 │   │   └── stats.ts             # Market stats collection
 │   └── scripts/                 # Various smoke tests
 ├── scripts/
-│   └── analyze_stats.py         # Python analysis script
+│   ├── entrypoint.sh
+│   ├── nothing-ever-happens/    # TypeScript strategy verifier
+│   └── update-cpp-client.sh     # C++ dependency sync helper
 ├── tests/                       # Bun test suite
 └── plots/                       # Generated analysis plots
 ```
@@ -136,8 +183,8 @@ poly-arb/
 ## Installation
 
 ```bash
-git clone https://github.com/SebastianBoehler/poly-arb.git
-cd poly-arb
+git clone https://github.com/SebastianBoehler/polymarket-research-lab.git
+cd polymarket-research-lab
 
 # Build C++ executables
 cd cpp
@@ -248,10 +295,10 @@ Trigger combined: 0.98
 
 ## Analysis & Insights
 
-The bot tracks market inefficiencies across crypto 15-minute prediction markets. Run the analysis script to generate visualizations:
+The bot tracks market inefficiencies across crypto 15-minute prediction markets. Run:
 
 ```bash
-python scripts/analyze_stats.py --csv output.csv --out-dir plots
+bun run src/scripts/analyze-markets.ts
 ```
 
 ### Market Inefficiency

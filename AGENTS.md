@@ -235,7 +235,7 @@ bun run src/scripts/laddering-smoke.ts
 bun run src/stats/stats.ts
 
 # Analyze collected stats
-python scripts/analyze_stats.py --csv stats-summary.csv --out-dir plots
+bun run src/scripts/analyze-markets.ts
 
 # Copy trading (monitor wallets and mirror trades)
 COPY_WALLETS=0xabc,0xdef DRY_RUN=true bun run copy-trade
@@ -318,7 +318,7 @@ Long-running data collector that snapshots all markets every N minutes, then a P
 **Architecture:**
 
 - `src/scripts/collect-market-data.ts` — Periodic scanner, writes CSVs to `./data/`
-- `scripts/analyze_markets.py` — Generates 8 plot types from collected data
+- `bun run src/scripts/analyze-markets.ts` — Generates market opportunity summaries from collected data
 
 **Outputs (CSVs in `./data/`):**
 
@@ -346,13 +346,11 @@ bun run collect
 # Custom interval (2 min) and more pages
 INTERVAL_MS=120000 MAX_PAGES=15 bun run collect
 
-# Generate plots from collected data
+# Generate market summaries from collected data
 bun run plots
-# or directly:
-python scripts/analyze_markets.py --data-dir ./data --out-dir market-plots
 
-# Minimum scans for time-series plots
-python scripts/analyze_markets.py --data-dir ./data --out-dir market-plots --min-scans 3
+# Minimum scans for market summaries
+bun run plots
 ```
 
 **Key env vars:**

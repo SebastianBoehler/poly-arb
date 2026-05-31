@@ -37,7 +37,7 @@ The current backtester is intentionally conservative for top-of-book CSV data:
 - This penalizes spread.
 - It does not model queue priority, order book depth, partial fills, fees, or latency.
 
-The backtester is in `scripts/backtest_strategies.py`.
+The legacy backtester implementation is no longer in the repository; this repo currently focuses on discovery and strategy verification workflows. The reported backtest results above are retained as historical context.
 
 ## Strategy Results
 

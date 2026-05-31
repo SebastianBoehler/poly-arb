@@ -1,7 +1,7 @@
 {
-  "name": "poly-arb",
+  "name": "polymarket-research-lab",
   "version": "1.0.0",
-  "description": "Real-time Polymarket arbitrage ladder bot for crypto up/down 15m markets",
+  "description": "Polymarket market research and trading toolkit (C++ core + TypeScript analysis + strategy backtests)",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -11,13 +11,15 @@
     "market-maker": "bun run src/strategies/market-maker.ts",
     "analyze": "bun run src/scripts/analyze-markets.ts",
     "collect": "bun run src/scripts/collect-market-data.ts",
-    "plots": "python scripts/analyze_markets.py --data-dir ./data --out-dir market-plots",
+    "plots": "bun run src/scripts/analyze-markets.ts",
     "stats": "bun run src/stats/stats.ts",
     "cpp:update-client": "./scripts/update-cpp-client.sh",
     "cpp:configure": "cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release",
     "cpp:build": "cmake --build cpp/build -j 4",
     "cpp:test": "ctest --test-dir cpp/build --output-on-failure",
     "discovery:cpp": "./cpp/build/discovery_mode --max 50 --iterations 1",
+    "strategy:nothing-ever-happens": "bun run scripts/nothing-ever-happens/main.ts",
+    "strategy:nothing-ever-happens:resolved": "bun run scripts/nothing-ever-happens/resolved-history.ts",
     "build": "bun build src/index.ts --outdir ./dist --target node",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
@@ -37,10 +39,10 @@
     "bun-types": "latest",
     "typescript": "^5.0.0"
   },
-  "keywords": ["polymarket", "arbitrage", "crypto", "trading", "websocket"],
+  "keywords": ["polymarket", "trading", "research", "analysis", "backtesting", "websocket", "cpp", "crypto"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/SebastianBoehler/poly-arb"
+    "url": "https://github.com/SebastianBoehler/polymarket-research-lab"
   }
 }
